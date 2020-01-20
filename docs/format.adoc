@@ -1,11 +1,7 @@
 # Mendoza patch format
 :toc:
 
-A Mendoza patch consists of a list of _operations_.
-
-## JSON representation
-
-TODO.
+A Mendoza patch consists of a list of _operations_ which are executed, very much like a virtual machine.
 
 ## Execution model
 
@@ -20,16 +16,80 @@ We also define the following terms:
 - The _input value_ is the value at the top of the input stack.
 - The _output value_ is the value at the top of the output stack.
 
-Here's an example of the execution of a simple patch:
+## Examples / tutorial
 
-0. Push the left document onto the input stack.
-0. Push a copy of the left document onto the output stack.
+Here are some examples which also serves as a mini tutorial.
+
+### Starting from scratch vs. starting with copy
+
+Sometimes it's better to start with a blank object and copy over the fields you need:
+
+- `Enter(Root, Object)`
+- `CopyField("name")`
+- `SetFieldValue("age", 30)`
+
+… while other times it's better to start with a copy and delete the fields you don't need:
+
+- `Enter(Root, Copy)`
+- `DeleteField("skills")`
+- `SetFieldValue("age", 30)`
+
+### Entering fields
+
+The `Enter` operation is usd for entering fields in objects:
+
+- `Enter(Root, Copy)`
+- `Enter(Field("user"), Copy)`
+- `Enter(Field("address"), Copy)`
+- `SetFieldValue("zip", 1234)`
+- `Return()`
+- `Return()`
+
+Note that entering a field remembers the key where it come from, which `Return()` then uses to set it.
+
+### Renaming a field
+
+Renaming a field is done by entering and then returning with a different key:
+
+- `Enter(Root, Copy)`
+- `Enter(Field("user"), Copy)`
+- `Return("userDetails")`
+
+### Dealing with arrays
+
+Arrays are typically dealt with by entering with a blank array and then using `AppendSlice` and `AppendValue`:
+
+- `Enter(Root, Copy)`
+- `Enter(Field("skills"), Array)`
+- `AppendSlice(0, 2)`
+- `AppendValue("Go")`
+- `Return()`
+
+
+### Complete patch
+
+The following patch:
+
+- `Enter(Root, Copy)`
+- `DeleteField("name")`
+- `Enter(Field("name"), Copy)`
+- `Return("fullName")`
+- `Enter(Field("skills"), Array)`
+- `AppendSlice(0, 2)`
+- `AppendValue("Go")`
+- `Return()`
+
+Has the following semantics:
+
+0. Push the left document onto the input stack, and a copy of it onto the output stack.
 0. Delete the field `"name"` in the output value.
-0. Copy the field `"name"` in the input value into the field `"fullName"` in the output value.
+0. Copy the field `"name"` in the input value into onto the input and output stack.
 0. Take the value of the field `"skills"`, push it onto the input stack and push an empty array onto the output stack.
 0. Append the slice `[0:2]` from the input value to the output value.
 0. Append the literal value `"Go"` to the output value.
 0. Pop from both stacks and store the result at `"skills"`.
+
+## List of operations
 
 ### `Enter` operation
 
@@ -76,6 +136,7 @@ More concretely:
 - `value`
 
 Pushes the value onto the output value stack.
+This operation only makes sense as the first operation in a patch (when you want to represent).
 
 ### `SetFieldValue` operation
 
@@ -84,14 +145,6 @@ Pushes the value onto the output value stack.
 - `value`
 
 Sets the field `key` in the output value object to `value`.
-
-[NOTE]
-====
-This is equivalent to:
-
-- `OutputValue(value)`
-- `Return(key)`
-====
 
 ### `CopyField` operation
 
@@ -129,3 +182,7 @@ Appends the `value` to the output value array.
 - `right`: `int`
 
 Takes the values stored between the indices `left` and `right` (exclusive) in the input value array and appends them to the output value array.
+
+## JSON representation
+
+TODO.
