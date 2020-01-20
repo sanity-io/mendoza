@@ -1,0 +1,131 @@
+# Mendoza patch format
+:toc:
+
+A Mendoza patch consists of a list of _operations_.
+
+## JSON representation
+
+TODO.
+
+## Execution model
+
+Applying a patch involves executing the operations while maintaining the following state:
+
+- The left document.
+- An _input stack_, used for traversing the left document.
+- An _output stack_, used for producing the right document. Every entry of the output stack also stores the _key_ where it came from.
+
+We also define the following terms:
+
+- The _input value_ is the value at the top of the input stack.
+- The _output value_ is the value at the top of the output stack.
+
+Here's an example of the execution of a simple patch:
+
+0. Push the left document onto the input stack.
+0. Push a copy of the left document onto the output stack.
+0. Delete the field `"name"` in the output value.
+0. Copy the field `"name"` in the input value into the field `"fullName"` in the output value.
+0. Take the value of the field `"skills"`, push it onto the input stack and push an empty array onto the output stack.
+0. Append the slice `[0:2]` from the input value to the output value.
+0. Append the literal value `"Go"` to the output value.
+0. Pop from both stacks and store the result at `"skills"`.
+
+### `Enter` operation
+
+.Params
+- `source`: One of `Index(int)`, `Field(string)`, `Root`
+- `output`: One of `Copy`, `Array`, `Object`, `Nop`
+
+The `Enter` operation is used for accessing and modifying nested objects.
+It executes in two steps:
+
+.Step 1: Finding the new input value
+- If `source` is `Index(int)`, it finds the new input value by looking up the element in the current input value array.
+- If `source` is `Field(string)` it finds the new input value by looking up the field in the current input value object.
+- If `source` is `Root`, then the new input value is the left document.
+
+.Step 2: Finding the new output value
+- If `output` is `Copy`, then the new output value is a copy of the new input value.
+- If `output` is `Array`, then the new output value is an empty array.
+- If `output` is `Object`, then the new output value is an empty object.
+- If `output` is `Nop`, then there is no new output value.
+
+After the new input/output value has been determined, it pushes them onto the stacks:
+- The new input value is pushed onto the input stack.
+- If there was a new output value, it's pushed onto the output stack together with information about the `source`.
+  See the `Return` operation for how this is used.
+
+### `Return` operation
+
+.Params
+- `key`: Optional `string`
+
+The `Return` operation pops from both the input/output stack and stores the result in the new output value object.
+More concretely:
+
+- The input stack is popped.
+- If the `key` is not present, then it's set to the field from the source stored in the top of the output stack.
+- Let `fieldValue` be a copy of the current output value.
+- The output stack is popped (thus the next value on the stack is now the output value).
+- The field `key` in the output value object is set to `fieldValue`.
+
+### `OutputValue` operation
+
+.Params
+- `value`
+
+Pushes the value onto the output value stack.
+
+### `SetFieldValue` operation
+
+.Params
+- `key`: `string`
+- `value`: `value`
+
+Sets the field `key` in the output value object to `value`.
+
+[NOTE]
+===
+This is equivalent to:
+
+- `OutputValue(value)`
+- `Return(key)`
+===
+
+### `CopyField` operation
+
+.Params
+- `key`: `string`
+
+Copies the field named `key` from the input value object into the output value object.
+
+[NOTE]
+===
+This is equivalent to:
+
+- `Enter(Field(key))`
+- `Return()`
+===
+
+### `DeleteField` operation
+
+.Params
+- `key`: `string`
+
+Deletes the field named `key` in the output value object.
+
+### `AppendValue` operation
+
+.Params
+- `value`: `value`
+
+Appends the `value` to the output value array.
+
+### `AppendSlice` operation
+
+.Params
+- `left`: `int`
+- `right`: `int`
+
+Takes the values stored between the indices `left` and `right` (exclusive) in the input value array and appends them to the output value array.
