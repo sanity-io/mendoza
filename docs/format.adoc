@@ -81,17 +81,17 @@ Pushes the value onto the output value stack.
 
 .Params
 - `key`: `string`
-- `value`: `value`
+- `value`
 
 Sets the field `key` in the output value object to `value`.
 
 [NOTE]
-===
+====
 This is equivalent to:
 
 - `OutputValue(value)`
 - `Return(key)`
-===
+====
 
 ### `CopyField` operation
 
@@ -101,12 +101,12 @@ This is equivalent to:
 Copies the field named `key` from the input value object into the output value object.
 
 [NOTE]
-===
+====
 This is equivalent to:
 
 - `Enter(Field(key))`
 - `Return()`
-===
+====
 
 ### `DeleteField` operation
 
@@ -118,7 +118,7 @@ Deletes the field named `key` in the output value object.
 ### `AppendValue` operation
 
 .Params
-- `value`: `value`
+- `value`
 
 Appends the `value` to the output value array.
 
