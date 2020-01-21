@@ -46,8 +46,8 @@ func DoubleDiff(left, right interface{}) (Patch, Patch, error) {
 
 	rightHashIndex := mendoza.NewHashIndex(rightList)
 	rightDiffer := differ{
-		left:      leftList,
-		right:     rightList,
+		left:      rightList,
+		right:     leftList,
 		hashIndex: rightHashIndex,
 	}
 	return leftDiffer.build(), rightDiffer.build(), nil

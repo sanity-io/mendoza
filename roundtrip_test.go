@@ -3,7 +3,6 @@ package mendoza_test
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/sanity-io/litter"
 	"github.com/sanity-io/mendoza"
 	"github.com/stretchr/testify/require"
 	"testing"
@@ -70,13 +69,14 @@ func TestRoundtrip(t *testing.T) {
 			err = json.Unmarshal([]byte(pair.Right), &right)
 			require.NoError(t, err)
 
-			patch, err := mendoza.Diff(left, right)
+			patch1, patch2, err := mendoza.DoubleDiff(left, right)
 			require.NoError(t, err)
 
-			litter.Dump(patch)
+			result1 := mendoza.Decode(left, patch1)
+			require.EqualValues(t, right, result1)
 
-			result := mendoza.Decode(left, patch)
-			require.EqualValues(t, right, result)
+			result2 := mendoza.Decode(right, patch2)
+			require.EqualValues(t, left, result2)
 		})
 	}
 }
