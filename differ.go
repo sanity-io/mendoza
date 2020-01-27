@@ -136,7 +136,9 @@ func (d *differ) reconstruct(idx int, reqs []request) {
 	for _, req := range reqs {
 		primaryIdx := -1
 
-		if entry.Reference.IsMapEntry() && d.left.IsNonEmptyMap(req.initialContext) {
+		if req.initialContext == -1 {
+			primaryIdx = 0
+		} else if entry.Reference.IsMapEntry() && d.left.IsNonEmptyMap(req.initialContext) {
 			for it := d.left.Iter(req.initialContext); !it.IsDone(); it.Next() {
 				key := it.GetKey()
 
