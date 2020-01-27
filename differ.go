@@ -114,6 +114,7 @@ type request struct {
 	initialContext int
 	size           int
 	patch          Patch
+	outputKey      string
 }
 
 func (d *differ) reconstruct(idx int, reqs []request) {
@@ -410,9 +411,13 @@ func (d *differ) reconstructMap(idx int, reqs []request, primaries []int) {
 				patch = append(patch, req.patch...)
 				size += req.size
 
-				// TODO: Don't pass along key if it's the same as we entered with
-				patch = append(patch, OpReturnIntoObject{key})
-				size += 1 + len(key)
+				if req.outputKey == key {
+					patch = append(patch, OpReturnIntoObject{""})
+					size += 1
+				} else {
+					patch = append(patch, OpReturnIntoObject{key})
+					size += 1 + len(key)
+				}
 			}
 		}
 
@@ -422,6 +427,7 @@ func (d *differ) reconstructMap(idx int, reqs []request, primaries []int) {
 			// Found a better thing!
 			req.size = size
 			req.patch = patch
+			req.outputKey = d.left.Entries[contextIdx].Reference.Key
 		}
 	}
 }
@@ -607,6 +613,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request, primaries []int) {
 			// Found a better thing!
 			req.size = size
 			req.patch = patch
+			req.outputKey = d.left.Entries[contextIdx].Reference.Key
 		}
 	}
 }

@@ -36,7 +36,7 @@ const (
 	codeEnterElementBlank
 
 	codeReturnIntoArray
-	codeReturnIntoObject // Key-less variant?
+	codeReturnIntoObject
 
 	codeObjectSetFieldValue
 	codeObjectCopyField
