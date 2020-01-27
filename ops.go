@@ -5,9 +5,7 @@ type EnterType uint8
 const (
 	EnterNop EnterType = iota
 	EnterCopy
-	EnterArray
-	EnterObject
-	EnterFinal
+	EnterBlank
 )
 
 //go-sumtype:decl Op
@@ -22,7 +20,7 @@ type Patch []Op
 
 type OpEnterField struct {
 	Enter EnterType
-	Key   string
+	Index int
 }
 
 type OpEnterElement struct {
@@ -34,49 +32,52 @@ type OpEnterRoot struct {
 	Enter EnterType
 }
 
-type OpReturn struct {
+type OpEnterValue struct {
+	Value interface{}
+}
+
+type OpReturnIntoObject struct {
 	Key string
+}
+
+type OpReturnIntoArray struct {
 }
 
 // Object helpers
 
-type OpSetFieldValue struct {
-	Key string
+type OpObjectSetFieldValue struct {
+	Key   string
 	Value interface{}
 }
 
-type OpOutputValue struct {
-	Value interface{}
+type OpObjectCopyField struct {
+	Index int
 }
 
-type OpCopyField struct {
-	Key string
-}
-
-type OpDeleteField struct {
-	Key string
+type OpObjectDeleteField struct {
+	Index int
 }
 
 // Array helpers
 
-type OpAppendValue struct {
+type OpArrayAppendValue struct {
 	Value interface{}
 }
 
-type OpAppendSlice struct {
+type OpArrayAppendSlice struct {
 	Left  int
 	Right int
 }
 
 // isOp() implementations:
-func (OpEnterRoot) isOp()   {}
-func (OpOutputValue) isOp() {}
-
-func (OpEnterField) isOp() {}
-func (OpEnterElement) isOp()  {}
-func (OpReturn) isOp()        {}
-func (OpSetFieldValue) isOp() {}
-func (OpCopyField) isOp()     {}
-func (OpDeleteField) isOp() {}
-func (OpAppendValue) isOp() {}
-func (OpAppendSlice) isOp() {}
+func (OpEnterRoot) isOp()           {}
+func (OpEnterValue) isOp()          {}
+func (OpEnterField) isOp()          {}
+func (OpEnterElement) isOp()        {}
+func (OpReturnIntoArray) isOp()     {}
+func (OpReturnIntoObject) isOp()    {}
+func (OpObjectSetFieldValue) isOp() {}
+func (OpObjectCopyField) isOp()     {}
+func (OpObjectDeleteField) isOp()   {}
+func (OpArrayAppendValue) isOp()    {}
+func (OpArrayAppendSlice) isOp()    {}

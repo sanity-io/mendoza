@@ -42,7 +42,6 @@ func hasherFor(t byte) *Hasher {
 	return h
 }
 
-
 func hashFor(t byte) Hash {
 	return hasherFor(t).Sum()
 }
@@ -89,4 +88,3 @@ func (h *Hasher) WriteField(key string, value Hash) {
 func (h *Hasher) WriteElement(value Hash) {
 	h.hasher.Write(value[:])
 }
-

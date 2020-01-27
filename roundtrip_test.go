@@ -77,6 +77,21 @@ func TestRoundtrip(t *testing.T) {
 
 			result2 := mendoza.Decode(right, patch2)
 			require.EqualValues(t, left, result2)
+
+			// Now try to encode and decode the patch
+			json1, err := json.Marshal(patch1)
+			require.NoError(t, err)
+			var parsedPatch1 mendoza.Patch
+			err = json.Unmarshal(json1, &parsedPatch1)
+			require.NoError(t, err)
+			require.EqualValues(t, patch1, parsedPatch1)
+
+			json2, err := json.Marshal(patch2)
+			require.NoError(t, err)
+			var parsedPatch2 mendoza.Patch
+			err = json.Unmarshal(json2, &parsedPatch2)
+			require.NoError(t, err)
+			require.EqualValues(t, patch2, parsedPatch2)
 		})
 	}
 }

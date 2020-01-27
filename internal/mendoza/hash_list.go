@@ -25,8 +25,8 @@ type Reference struct {
 	Key   string
 }
 
-func MapEntryReference(key string) Reference {
-	return Reference{Key: key}
+func MapEntryReference(idx int, key string) Reference {
+	return Reference{Index: idx, Key: key}
 }
 
 func SliceEntryReference(idx int) Reference {
@@ -44,13 +44,14 @@ func (ref Reference) IsSliceEntry() bool {
 type HashEntry struct {
 	Hash      Hash
 	Value     interface{}
+	Size      int
 	Parent    int
 	Sibling   int
 	Reference Reference
 }
 
 func (hashList *HashList) AddDocument(obj interface{}) error {
-	_, err := hashList.process(-1, Reference{}, obj)
+	_, _, err := hashList.process(-1, Reference{}, obj)
 	return err
 }
 
@@ -72,7 +73,7 @@ func (hashList *HashList) IsNonEmptySlice(idx int) bool {
 	return nextEntry.Parent == idx && nextEntry.Reference.IsSliceEntry()
 }
 
-func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (result Hash, err error) {
+func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (result Hash, size int, err error) {
 	current := len(hashList.Entries)
 
 	hashList.Entries = append(hashList.Entries, HashEntry{
@@ -85,29 +86,35 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 	switch obj := obj.(type) {
 	case nil:
 		result = HashNull
+		size = 1
 	case bool:
 		if obj {
 			result = HashTrue
 		} else {
 			result = HashFalse
 		}
+		size = 1
 	case float64:
 		result = HashFloat64(obj)
+		size = 8
 	case string:
 		result = HashString(obj)
+		size = len(obj) + 1
 	case map[string]interface{}:
 		hasher := HasherMap()
 		keys := sortedKeys(obj)
 
 		prevIdx := -1
 
-		for _, key := range keys {
+		for idx, key := range keys {
 			value := obj[key]
 			entryIdx := len(hashList.Entries)
-			valueHash, err := hashList.process(current, MapEntryReference(key), value)
+			valueHash, valueSize, err := hashList.process(current, MapEntryReference(idx, key), value)
 			if err != nil {
-				return result, err
+				return result, size, err
 			}
+
+			size += len(key) + valueSize + 1
 
 			if prevIdx != -1 {
 				prevEntry := &hashList.Entries[prevIdx]
@@ -128,10 +135,12 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 		for idx, value := range obj {
 			entryIdx := len(hashList.Entries)
 
-			valueHash, err := hashList.process(current, SliceEntryReference(idx), value)
+			valueHash, valueSize, err := hashList.process(current, SliceEntryReference(idx), value)
 			if err != nil {
-				return result, err
+				return result, size, err
 			}
+
+			size += valueSize + 1
 
 			if prevIdx != -1 {
 				prevEntry := &hashList.Entries[prevIdx]
@@ -145,12 +154,13 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 
 		result = hasher.Sum()
 	default:
-		return result, errors.New("unsupported type")
+		return result, size, errors.New("unsupported type")
 	}
 
 	hashList.Entries[current].Hash = result
+	hashList.Entries[current].Size = size
 
-	return result, nil
+	return result, size, nil
 }
 
 func (hashList *HashList) Iter(idx int) *Iter {
