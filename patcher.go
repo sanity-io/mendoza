@@ -144,14 +144,17 @@ func (patcher *patcher) outputObject() map[string]interface{} {
 	entry := &patcher.outputStack[len(patcher.outputStack)-1]
 
 	if entry.writableObject == nil {
-		src := entry.source.(map[string]interface{})
-		obj := make(map[string]interface{}, len(src))
+		if entry.source == nil {
+			entry.writableObject = make(map[string]interface{})
+		} else {
+			src := entry.source.(map[string]interface{})
+			obj := make(map[string]interface{}, len(src))
 
-		for k, v := range src {
-			obj[k] = v
+			for k, v := range src {
+				obj[k] = v
+			}
+			entry.writableObject = obj
 		}
-
-		entry.writableObject = obj
 	}
 
 	return entry.writableObject
