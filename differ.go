@@ -10,7 +10,8 @@ type differ struct {
 	hashIndex *mendoza.HashIndex
 }
 
-func Diff(left, right interface{}) (Patch, error) {
+// Creates a patch which can be applied to the left document to produce the right document.
+func CreatePatch(left, right interface{}) (Patch, error) {
 	leftList, err := mendoza.HashListFor(left)
 	if err != nil {
 		return nil, err
@@ -29,7 +30,9 @@ func Diff(left, right interface{}) (Patch, error) {
 	return differ.build(), nil
 }
 
-func DoubleDiff(left, right interface{}) (Patch, Patch, error) {
+// Creates two patches: The first can be applied to the left document to produce the right document,
+// the second can be applied to the right document to produce the left document.
+func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 	leftList, err := mendoza.HashListFor(left)
 	if err != nil {
 		return nil, nil, err

@@ -28,9 +28,9 @@ type patcher struct {
 	outputStack []outputEntry
 }
 
-// TODO: Different name?
-
-func Decode(root interface{}, patch Patch) interface{} {
+// Applies a patch to a document. Note that this method can panic if
+// the document is the same that was used to produce the patch.
+func ApplyPatch(root interface{}, patch Patch) interface{} {
 	p := patcher{
 		root: root,
 	}

@@ -69,13 +69,13 @@ func TestRoundtrip(t *testing.T) {
 			err = json.Unmarshal([]byte(pair.Right), &right)
 			require.NoError(t, err)
 
-			patch1, patch2, err := mendoza.DoubleDiff(left, right)
+			patch1, patch2, err := mendoza.CreateDoublePatch(left, right)
 			require.NoError(t, err)
 
-			result1 := mendoza.Decode(left, patch1)
+			result1 := mendoza.ApplyPatch(left, patch1)
 			require.EqualValues(t, right, result1)
 
-			result2 := mendoza.Decode(right, patch2)
+			result2 := mendoza.ApplyPatch(right, patch2)
 			require.EqualValues(t, left, result2)
 
 			// Now try to encode and decode the patch

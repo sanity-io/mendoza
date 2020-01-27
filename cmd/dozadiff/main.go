@@ -30,7 +30,7 @@ func main() {
 	aDoc := readJson(os.Args[1])
 	bDoc := readJson(os.Args[2])
 
-	patch, err := mendoza.Diff(aDoc, bDoc)
+	patch, err := mendoza.CreatePatch(aDoc, bDoc)
 	if err != nil {
 		panic(err)
 	}

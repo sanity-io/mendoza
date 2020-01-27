@@ -14,6 +14,7 @@ type Op interface {
 	isOp()
 }
 
+// A patch is a list of operations.
 type Patch []Op
 
 // Stack operators

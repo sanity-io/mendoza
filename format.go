@@ -2,6 +2,7 @@ package mendoza
 
 import "fmt"
 
+// Writer is an interface for writing values. This can be used for supporting a custom serialization format.
 type Writer interface {
 	WriteUint8(v uint8) error
 	WriteUint(v int) error
@@ -9,6 +10,7 @@ type Writer interface {
 	WriteValue(v interface{}) error
 }
 
+// Writer is an interface for reading values. This can be used for supporting a custom serialization format.
 type Reader interface {
 	ReadUint8() (uint8, error)
 	ReadUint() (int, error)
@@ -19,31 +21,32 @@ type Reader interface {
 // Note: This code is intentionally very verbose/repetitive in order to be forward compatible.
 
 const (
-	CodeEnterValue uint8 = iota
+	codeEnterValue uint8 = iota
 
-	CodeEnterRootNop
-	CodeEnterRootCopy
-	CodeEnterRootBlank
+	codeEnterRootNop
+	codeEnterRootCopy
+	codeEnterRootBlank
 
-	CodeEnterFieldNop
-	CodeEnterFieldCopy
-	CodeEnterFieldBlank
+	codeEnterFieldNop
+	codeEnterFieldCopy
+	codeEnterFieldBlank
 
-	CodeEnterElementNop
-	CodeEnterElementCopy
-	CodeEnterElementBlank
+	codeEnterElementNop
+	codeEnterElementCopy
+	codeEnterElementBlank
 
-	CodeReturnIntoArray
-	CodeReturnIntoObject // Key-less variant?
+	codeReturnIntoArray
+	codeReturnIntoObject // Key-less variant?
 
-	CodeObjectSetFieldValue
-	CodeObjectCopyField
-	CodeObjectDeleteField
+	codeObjectSetFieldValue
+	codeObjectCopyField
+	codeObjectDeleteField
 
-	CodeArrayAppendValue
-	CodeArrayAppendSlice // Index-variant?
+	codeArrayAppendValue
+	codeArrayAppendSlice // Index-variant?
 )
 
+// Reads a single operation.
 func ReadFrom(r Reader) (Op, error) {
 	code, err := r.ReadUint8()
 	if err != nil {
@@ -51,63 +54,63 @@ func ReadFrom(r Reader) (Op, error) {
 	}
 
 	switch code {
-	case CodeEnterValue:
+	case codeEnterValue:
 		val, err := r.ReadValue()
 		if err != nil {
 			return nil, err
 		}
 		return OpEnterValue{val}, nil
-	case CodeEnterRootNop:
+	case codeEnterRootNop:
 		return OpEnterRoot{EnterNop}, nil
-	case CodeEnterRootCopy:
+	case codeEnterRootCopy:
 		return OpEnterRoot{EnterCopy}, nil
-	case CodeEnterRootBlank:
+	case codeEnterRootBlank:
 		return OpEnterRoot{EnterBlank}, nil
-	case CodeEnterFieldNop:
+	case codeEnterFieldNop:
 		idx, err := r.ReadUint()
 		if err != nil {
 			return nil, err
 		}
 		return OpEnterField{EnterNop, idx}, nil
-	case CodeEnterFieldCopy:
+	case codeEnterFieldCopy:
 		idx, err := r.ReadUint()
 		if err != nil {
 			return nil, err
 		}
 		return OpEnterField{EnterCopy, idx}, nil
-	case CodeEnterFieldBlank:
+	case codeEnterFieldBlank:
 		idx, err := r.ReadUint()
 		if err != nil {
 			return nil, err
 		}
 		return OpEnterField{EnterBlank, idx}, nil
-	case CodeEnterElementNop:
+	case codeEnterElementNop:
 		idx, err := r.ReadUint()
 		if err != nil {
 			return nil, err
 		}
 		return OpEnterElement{EnterNop, idx}, nil
-	case CodeEnterElementCopy:
+	case codeEnterElementCopy:
 		idx, err := r.ReadUint()
 		if err != nil {
 			return nil, err
 		}
 		return OpEnterElement{EnterCopy, idx}, nil
-	case CodeEnterElementBlank:
+	case codeEnterElementBlank:
 		idx, err := r.ReadUint()
 		if err != nil {
 			return nil, err
 		}
 		return OpEnterElement{EnterBlank, idx}, nil
-	case CodeReturnIntoArray:
+	case codeReturnIntoArray:
 		return OpReturnIntoArray{}, nil
-	case CodeReturnIntoObject:
+	case codeReturnIntoObject:
 		key, err := r.ReadString()
 		if err != nil {
 			return nil, err
 		}
 		return OpReturnIntoObject{key}, nil
-	case CodeObjectSetFieldValue:
+	case codeObjectSetFieldValue:
 		key, err := r.ReadString()
 		if err != nil {
 			return nil, err
@@ -117,25 +120,25 @@ func ReadFrom(r Reader) (Op, error) {
 			return nil, err
 		}
 		return  OpObjectSetFieldValue{key, value}, nil
-	case CodeObjectCopyField:
+	case codeObjectCopyField:
 		idx, err := r.ReadUint()
 		if err != nil {
 			return nil, err
 		}
 		return  OpObjectCopyField{idx}, nil
-	case CodeObjectDeleteField:
+	case codeObjectDeleteField:
 		idx, err := r.ReadUint()
 		if err != nil {
 			return nil, err
 		}
 		return  OpObjectDeleteField{idx}, nil
-	case CodeArrayAppendValue:
+	case codeArrayAppendValue:
 		value, err := r.ReadValue()
 		if err != nil {
 			return nil, err
 		}
 		return  OpArrayAppendValue{value}, nil
-	case CodeArrayAppendSlice:
+	case codeArrayAppendSlice:
 		left, err := r.ReadUint()
 		if err != nil {
 			return nil, err
@@ -150,10 +153,11 @@ func ReadFrom(r Reader) (Op, error) {
 	}
 }
 
+// Writes a single operation to a writer.
 func WriteTo(w Writer, op Op) error {
 	switch op := op.(type) {
 	case OpEnterValue:
-		err := w.WriteUint8(CodeEnterValue)
+		err := w.WriteUint8(codeEnterValue)
 		if err != nil {
 			return err
 		}
@@ -161,28 +165,28 @@ func WriteTo(w Writer, op Op) error {
 	case OpEnterRoot:
 		switch op.Enter {
 		case EnterNop:
-			return w.WriteUint8(CodeEnterRootNop)
+			return w.WriteUint8(codeEnterRootNop)
 		case EnterCopy:
-			return w.WriteUint8(CodeEnterRootCopy)
+			return w.WriteUint8(codeEnterRootCopy)
 		case EnterBlank:
-			return w.WriteUint8(CodeEnterRootBlank)
+			return w.WriteUint8(codeEnterRootBlank)
 		default:
 			panic("invalid enter type")
 		}
 	case OpEnterField:
 		switch op.Enter {
 		case EnterNop:
-			err := w.WriteUint8(CodeEnterFieldNop)
+			err := w.WriteUint8(codeEnterFieldNop)
 			if err != nil {
 				return err
 			}
 		case EnterCopy:
-			err := w.WriteUint8(CodeEnterFieldCopy)
+			err := w.WriteUint8(codeEnterFieldCopy)
 			if err != nil {
 				return err
 			}
 		case EnterBlank:
-			err := w.WriteUint8(CodeEnterFieldBlank)
+			err := w.WriteUint8(codeEnterFieldBlank)
 			if err != nil {
 				return err
 			}
@@ -194,17 +198,17 @@ func WriteTo(w Writer, op Op) error {
 	case OpEnterElement:
 		switch op.Enter {
 		case EnterNop:
-			err := w.WriteUint8(CodeEnterElementNop)
+			err := w.WriteUint8(codeEnterElementNop)
 			if err != nil {
 				return err
 			}
 		case EnterCopy:
-			err := w.WriteUint8(CodeEnterElementCopy)
+			err := w.WriteUint8(codeEnterElementCopy)
 			if err != nil {
 				return err
 			}
 		case EnterBlank:
-			err := w.WriteUint8(CodeEnterElementBlank)
+			err := w.WriteUint8(codeEnterElementBlank)
 			if err != nil {
 				return err
 			}
@@ -214,15 +218,15 @@ func WriteTo(w Writer, op Op) error {
 
 		return w.WriteUint(op.Index)
 	case OpReturnIntoArray:
-		return w.WriteUint8(CodeReturnIntoArray)
+		return w.WriteUint8(codeReturnIntoArray)
 	case OpReturnIntoObject:
-		err := w.WriteUint8(CodeReturnIntoObject)
+		err := w.WriteUint8(codeReturnIntoObject)
 		if err != nil {
 			return err
 		}
 		return w.WriteString(op.Key)
 	case OpObjectSetFieldValue:
-		err := w.WriteUint8(CodeObjectSetFieldValue)
+		err := w.WriteUint8(codeObjectSetFieldValue)
 		if err != nil {
 			return err
 		}
@@ -232,19 +236,19 @@ func WriteTo(w Writer, op Op) error {
 		}
 		return w.WriteValue(op.Value)
 	case OpObjectCopyField:
-		err := w.WriteUint8(CodeObjectCopyField)
+		err := w.WriteUint8(codeObjectCopyField)
 		if err != nil {
 			return err
 		}
 		return w.WriteUint(op.Index)
 	case OpObjectDeleteField:
-		err := w.WriteUint8(CodeObjectDeleteField)
+		err := w.WriteUint8(codeObjectDeleteField)
 		if err != nil {
 			return err
 		}
 		return w.WriteUint(op.Index)
 	case OpArrayAppendSlice:
-		err := w.WriteUint8(CodeArrayAppendSlice)
+		err := w.WriteUint8(codeArrayAppendSlice)
 		if err != nil {
 			return err
 		}
@@ -254,7 +258,7 @@ func WriteTo(w Writer, op Op) error {
 		}
 		return w.WriteUint(op.Right)
 	case OpArrayAppendValue:
-		err := w.WriteUint8(CodeArrayAppendValue)
+		err := w.WriteUint8(codeArrayAppendValue)
 		if err != nil {
 			return err
 		}
@@ -264,6 +268,7 @@ func WriteTo(w Writer, op Op) error {
 	panic("unknown op")
 }
 
+// Writes a patch to a writer.
 func (patch Patch) WriteTo(w Writer) error {
 	for _, op := range patch {
 		err := WriteTo(w, op)
