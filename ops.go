@@ -70,6 +70,17 @@ type OpArrayAppendSlice struct {
 	Right int
 }
 
+// String helpers
+
+type OpStringAppendString struct {
+	String string
+}
+
+type OpStringAppendSlice struct {
+	Left  int
+	Right int
+}
+
 // isOp() implementations:
 func (OpEnterRoot) isOp()           {}
 func (OpEnterValue) isOp()          {}
@@ -81,4 +92,6 @@ func (OpObjectSetFieldValue) isOp() {}
 func (OpObjectCopyField) isOp()     {}
 func (OpObjectDeleteField) isOp()   {}
 func (OpArrayAppendValue) isOp()    {}
-func (OpArrayAppendSlice) isOp()    {}
+func (OpArrayAppendSlice) isOp()   {}
+func (OpStringAppendString) isOp() {}
+func (OpStringAppendSlice) isOp()  {}

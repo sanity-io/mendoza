@@ -44,6 +44,9 @@ const (
 
 	codeArrayAppendValue
 	codeArrayAppendSlice // Index-variant?
+
+	codeStringAppendString
+	codeStringAppendSlice
 )
 
 // Reads a single operation.
@@ -148,6 +151,22 @@ func ReadFrom(r Reader) (Op, error) {
 			return nil, err
 		}
 		return  OpArrayAppendSlice{left, right}, nil
+	case codeStringAppendString:
+		str, err := r.ReadString()
+		if err != nil {
+			return nil, err
+		}
+		return  OpStringAppendString{str}, nil
+	case codeStringAppendSlice:
+		left, err := r.ReadUint()
+		if err != nil {
+			return nil, err
+		}
+		right, err := r.ReadUint()
+		if err != nil {
+			return nil, err
+		}
+		return  OpStringAppendSlice{left, right}, nil
 	default:
 		return nil, fmt.Errorf("unknown code: %d", code)
 	}
@@ -263,7 +282,24 @@ func WriteTo(w Writer, op Op) error {
 			return err
 		}
 		return w.WriteValue(op.Value)
+	case OpStringAppendSlice:
+		err := w.WriteUint8(codeStringAppendSlice)
+		if err != nil {
+			return err
+		}
+		err = w.WriteUint(op.Left)
+		if err != nil {
+			return err
+		}
+		return w.WriteUint(op.Right)
+	case OpStringAppendString:
+		err := w.WriteUint8(codeStringAppendString)
+		if err != nil {
+			return err
+		}
+		return w.WriteValue(op.String)
 	}
+
 
 	panic("unknown op")
 }

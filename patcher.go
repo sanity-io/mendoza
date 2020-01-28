@@ -10,6 +10,7 @@ type outputEntry struct {
 	source         interface{}
 	writableArray  []interface{}
 	writableObject map[string]interface{}
+	writableString string
 }
 
 type inputEntry struct {
@@ -102,6 +103,10 @@ func (entry *outputEntry) result() interface{} {
 		return entry.writableArray
 	}
 
+	if len(entry.writableString) > 0 {
+		return entry.writableString
+	}
+
 	return entry.source
 }
 
@@ -133,6 +138,10 @@ func (patcher *patcher) inputObject() map[string]interface{} {
 
 func (patcher *patcher) inputArray() []interface{} {
 	return patcher.inputEntry().value.([]interface{})
+}
+
+func (patcher *patcher) inputString() string {
+	return patcher.inputEntry().value.(string)
 }
 
 func (patcher *patcher) result() interface{} {
@@ -173,6 +182,19 @@ func (patcher *patcher) outputArray() *[]interface{} {
 	return &entry.writableArray
 }
 
+func (patcher *patcher) outputString() *string {
+	entry := &patcher.outputStack[len(patcher.outputStack)-1]
+
+	if entry.source != nil {
+		src := entry.source.(string)
+		entry.writableString = src
+		entry.source = nil
+	}
+
+	return &entry.writableString
+}
+
+
 func (patcher *patcher) process(op Op) {
 	switch op := op.(type) {
 	case OpEnterValue:
@@ -210,6 +232,13 @@ func (patcher *patcher) process(op Op) {
 		src := patcher.inputArray()
 		arr := patcher.outputArray()
 		*arr = append(*arr, src[op.Left:op.Right]...)
+	case OpStringAppendString:
+		str := patcher.outputString()
+		*str = *str + op.String
+	case OpStringAppendSlice:
+		src := patcher.inputString()
+		str := patcher.outputString()
+		*str = *str + src[op.Left:op.Right]
 	default:
 		panic(fmt.Errorf("unknown op: %#v", op))
 	}

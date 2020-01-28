@@ -92,6 +92,11 @@ For arrays/objects this is done in a few steps:
 func (d *differ) build() Patch {
 	root := d.right.Entries[0]
 
+	if d.left.Entries[0].Hash == root.Hash {
+		// Exact same value
+		return Patch{OpEnterRoot{EnterCopy}}
+	}
+
 	reqs := []request{
 		{
 			initialContext: -1,
@@ -165,6 +170,11 @@ func (d *differ) reconstruct(idx int, reqs []request) {
 
 	if d.right.IsNonEmptySlice(idx) {
 		d.reconstructSlice(idx, reqs, primaries)
+		return
+	}
+
+	if rightString, ok := entry.Value.(string); ok {
+		d.reconstructString(idx, rightString, reqs, primaries)
 		return
 	}
 }
@@ -616,6 +626,74 @@ func (d *differ) reconstructSlice(idx int, reqs []request, primaries []int) {
 			req.size = size
 			req.patch = patch
 			req.outputKey = d.left.Entries[contextIdx].Reference.Key
+		}
+	}
+}
+
+// String handling
+
+func commonPrefix(a, b string) int {
+	i := 0
+	for i < len(a) && i < len(b) && a[i] == b[i] {
+		i++
+	}
+	return i
+}
+
+func commonSuffix(a, b string) int {
+	i := 0
+	for i < len(a) && i < len(b) && a[len(a)-1-i] == b[len(b)-1-i] {
+		i++
+	}
+	return i
+}
+
+func (d *differ) reconstructString(idx int, rightString string, reqs []request, primaries []int) {
+	for reqIdx, primaryIdx := range primaries {
+		if primaryIdx == -1 {
+			continue
+		}
+
+		leftEntry := d.left.Entries[primaryIdx]
+
+		leftString, ok := leftEntry.Value.(string)
+		if !ok {
+			continue
+		}
+
+		patch := Patch{}
+		size := 0
+
+		patch = append(patch, d.enterPatch(EnterBlank, primaryIdx))
+		size += 2
+
+		prefix := commonPrefix(leftString, rightString)
+
+		if prefix > 0 {
+			patch = append(patch, OpStringAppendSlice{0, prefix})
+			size += 3
+		}
+
+		suffix := commonSuffix(leftString, rightString)
+
+		mid := rightString[prefix : len(rightString)-suffix]
+		if len(mid) > 0 {
+			patch = append(patch, OpStringAppendString{mid})
+			size += 1 + len(mid)
+		}
+
+		if suffix > 0 {
+			patch = append(patch, OpStringAppendSlice{len(leftString) - suffix, len(leftString)})
+			size += 3
+		}
+
+		req := &reqs[reqIdx]
+
+		if size < req.size {
+			// Found a better thing!
+			req.size = size
+			req.patch = patch
+			req.outputKey = d.left.Entries[primaryIdx].Reference.Key
 		}
 	}
 }

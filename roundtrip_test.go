@@ -56,6 +56,30 @@ var Documents = []struct {
 		`{"a": [1, 2]}`,
 		`{"a": [2, 3]}`,
 	},
+	{
+		`{"a": "abcdef"}`,
+		`{"a": "abcdefg"}`,
+	},
+	{
+		`{"a": "abcdef"}`,
+		`{"a": "abcgihdef"}`,
+	},
+	{
+		`{"a": "abcdefghijk"}`,
+		`{"a": "abcdehijk"}`,
+	},
+	{
+		`{"a": "abcdefghijk"}`,
+		`{"a": "bcdeghijk"}`,
+	},
+	{
+		`"abc"`,
+		`"abcdef"`,
+	},
+	{
+		`"abc"`,
+		`"abc"`,
+	},
 }
 
 func TestRoundtrip(t *testing.T) {
