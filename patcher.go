@@ -79,19 +79,20 @@ func (patcher *patcher) returnIntoField(key string) {
 	obj[key] = entry.result()
 }
 
-func (patcher *patcher) returnIntoArray() {
+func (patcher *patcher) popInput() {
 	patcher.inputStack = patcher.inputStack[:len(patcher.inputStack)-1]
+}
 
-	// Read the current value, then pop the stack
-	entry := patcher.outputStack[len(patcher.outputStack)-1]
+func (patcher *patcher) popOutput() {
 	patcher.outputStack = patcher.outputStack[:len(patcher.outputStack)-1]
-
-	arr := patcher.outputArray()
-	*arr = append(*arr, entry.result())
 }
 
 func (patcher *patcher) inputEntry() *inputEntry {
 	return &patcher.inputStack[len(patcher.inputStack)-1]
+}
+
+func (patcher *patcher) outputEntry() *outputEntry {
+	return &patcher.outputStack[len(patcher.outputStack)-1]
 }
 
 func (entry *outputEntry) result() interface{} {
@@ -211,9 +212,23 @@ func (patcher *patcher) process(op Op) {
 		value := arr[op.Index]
 		patcher.enter(op.Enter, value, "")
 	case OpReturnIntoObject:
-		patcher.returnIntoField(op.Key)
+		patcher.popInput()
+		entry := *patcher.outputEntry()
+		patcher.popOutput()
+		obj := patcher.outputObject()
+		obj[op.Key] = entry.result()
+	case OpReturnIntoObjectKeyless:
+		patcher.popInput()
+		entry := *patcher.outputEntry()
+		patcher.popOutput()
+		obj := patcher.outputObject()
+		obj[entry.key] = entry.result()
 	case OpReturnIntoArray:
-		patcher.returnIntoArray()
+		patcher.popInput()
+		entry := *patcher.outputEntry()
+		patcher.popOutput()
+		arr := patcher.outputArray()
+		*arr = append(*arr, entry.result())
 	case OpObjectSetFieldValue:
 		obj := patcher.outputObject()
 		obj[op.Key] = op.Value

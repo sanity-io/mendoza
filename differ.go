@@ -441,7 +441,7 @@ func (d *differ) reconstructMap(idx int, reqs []request, primaries []int) {
 				size += req.size
 
 				if req.outputKey == key {
-					patch = append(patch, OpReturnIntoObject{""})
+					patch = append(patch, OpReturnIntoObjectKeyless{})
 					size += 1
 				} else {
 					patch = append(patch, OpReturnIntoObject{key})

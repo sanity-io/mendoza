@@ -37,6 +37,7 @@ const (
 
 	codeReturnIntoArray
 	codeReturnIntoObject
+	codeReturnIntoObjectKeyless
 
 	codeObjectSetFieldValue
 	codeObjectCopyField
@@ -113,6 +114,8 @@ func ReadFrom(r Reader) (Op, error) {
 			return nil, err
 		}
 		return OpReturnIntoObject{key}, nil
+	case codeReturnIntoObjectKeyless:
+		return OpReturnIntoObjectKeyless{}, nil
 	case codeObjectSetFieldValue:
 		key, err := r.ReadString()
 		if err != nil {
@@ -244,6 +247,8 @@ func WriteTo(w Writer, op Op) error {
 			return err
 		}
 		return w.WriteString(op.Key)
+	case OpReturnIntoObjectKeyless:
+		return w.WriteUint8(codeReturnIntoObjectKeyless)
 	case OpObjectSetFieldValue:
 		err := w.WriteUint8(codeObjectSetFieldValue)
 		if err != nil {

@@ -41,6 +41,9 @@ type OpReturnIntoObject struct {
 	Key string
 }
 
+type OpReturnIntoObjectKeyless struct {
+}
+
 type OpReturnIntoArray struct {
 }
 
@@ -82,16 +85,17 @@ type OpStringAppendSlice struct {
 }
 
 // isOp() implementations:
-func (OpEnterRoot) isOp()           {}
-func (OpEnterValue) isOp()          {}
-func (OpEnterField) isOp()          {}
-func (OpEnterElement) isOp()        {}
-func (OpReturnIntoArray) isOp()     {}
-func (OpReturnIntoObject) isOp()    {}
-func (OpObjectSetFieldValue) isOp() {}
-func (OpObjectCopyField) isOp()     {}
-func (OpObjectDeleteField) isOp()   {}
-func (OpArrayAppendValue) isOp()    {}
-func (OpArrayAppendSlice) isOp()   {}
-func (OpStringAppendString) isOp() {}
-func (OpStringAppendSlice) isOp()  {}
+func (OpEnterRoot) isOp()               {}
+func (OpEnterValue) isOp()              {}
+func (OpEnterField) isOp()              {}
+func (OpEnterElement) isOp()            {}
+func (OpReturnIntoArray) isOp()         {}
+func (OpReturnIntoObject) isOp()        {}
+func (OpReturnIntoObjectKeyless) isOp() {}
+func (OpObjectSetFieldValue) isOp()     {}
+func (OpObjectCopyField) isOp()         {}
+func (OpObjectDeleteField) isOp()       {}
+func (OpArrayAppendValue) isOp()        {}
+func (OpArrayAppendSlice) isOp()        {}
+func (OpStringAppendString) isOp()      {}
+func (OpStringAppendSlice) isOp()       {}
