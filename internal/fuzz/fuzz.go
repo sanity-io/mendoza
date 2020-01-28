@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/sanity-io/mendoza"
+	"github.com/sanity-io/mendoza/pkg/mendozamsgpack"
 	"reflect"
 	"unicode/utf8"
 )
@@ -22,6 +23,22 @@ func roundtripJSON(patch mendoza.Patch) {
 
 	if !reflect.DeepEqual(patch, decoded) {
 		panic("JSON serialization didn't roundtrip")
+	}
+}
+
+func roundtripMsgpack(patch mendoza.Patch) {
+	b, err := mendozamsgpack.Marshal(patch)
+	if err != nil {
+		panic(err)
+	}
+
+	decoded, err := mendozamsgpack.Unmarshal(b)
+	if err != nil {
+		panic(err)
+	}
+
+	if !reflect.DeepEqual(patch, decoded) {
+		panic("msgpack serialization didn't roundtrip")
 	}
 }
 
@@ -60,6 +77,8 @@ func Fuzz(data []byte) int {
 
 	roundtripJSON(patch1)
 	roundtripJSON(patch2)
+	roundtripMsgpack(patch1)
+	roundtripMsgpack(patch2)
 
 	return 0
 }
