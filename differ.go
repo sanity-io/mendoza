@@ -122,6 +122,14 @@ type request struct {
 	outputKey      string
 }
 
+func (req *request) update(patch Patch, size int, outputKey string) {
+	if size < req.size {
+		req.patch = patch
+		req.size = size
+		req.outputKey = outputKey
+	}
+}
+
 func (d *differ) reconstruct(idx int, reqs []request) {
 	if len(reqs) == 0 {
 		return
@@ -434,13 +442,7 @@ func (d *differ) reconstructMap(idx int, reqs []request, primaries []int) {
 		}
 
 		req := &reqs[cand.requestIdx]
-
-		if size < req.size {
-			// Found a better thing!
-			req.size = size
-			req.patch = patch
-			req.outputKey = d.left.Entries[contextIdx].Reference.Key
-		}
+		req.update(patch, size, d.left.Entries[contextIdx].Reference.Key)
 	}
 }
 
@@ -620,13 +622,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request, primaries []int) {
 		}
 
 		req := &reqs[cand.requestIdx]
-
-		if size < req.size {
-			// Found a better thing!
-			req.size = size
-			req.patch = patch
-			req.outputKey = d.left.Entries[contextIdx].Reference.Key
-		}
+		req.update(patch, size, d.left.Entries[contextIdx].Reference.Key)
 	}
 }
 
@@ -688,12 +684,6 @@ func (d *differ) reconstructString(idx int, rightString string, reqs []request, 
 		}
 
 		req := &reqs[reqIdx]
-
-		if size < req.size {
-			// Found a better thing!
-			req.size = size
-			req.patch = patch
-			req.outputKey = d.left.Entries[primaryIdx].Reference.Key
-		}
+		req.update(patch, size, d.left.Entries[primaryIdx].Reference.Key)
 	}
 }
