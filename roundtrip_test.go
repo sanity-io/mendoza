@@ -93,8 +93,12 @@ var Documents = []struct {
 		`{"":"","0000":""}`,
 	},
 	{
-			`{"H":{"":{}}}`,
-			`{"H":0}`,
+		`{"H":{"":{}}}`,
+		`{"H":0}`,
+	},
+	{
+		`"݆݆݅Ʌ"`,
+		`"І݆Ʌ"`,
 	},
 }
 
@@ -124,6 +128,7 @@ func TestRoundtrip(t *testing.T) {
 			var parsedPatch1 mendoza.Patch
 			err = json.Unmarshal(json1, &parsedPatch1)
 			require.NoError(t, err)
+
 			require.EqualValues(t, patch1, parsedPatch1)
 
 			json2, err := json.Marshal(patch2)

@@ -2,6 +2,7 @@ package mendoza
 
 import (
 	"github.com/sanity-io/mendoza/internal/mendoza"
+	"unicode/utf8"
 )
 
 type differ struct {
@@ -645,16 +646,28 @@ func (d *differ) reconstructSlice(idx int, reqs []request, primaries []int) {
 
 func commonPrefix(a, b string) int {
 	i := 0
-	for i < len(a) && i < len(b) && a[i] == b[i] {
-		i++
+	for i < len(a) && i < len(b) {
+		ar, size := utf8.DecodeRuneInString(a[i:])
+		br, _ := utf8.DecodeRuneInString(b[i:])
+		if ar != br {
+			break
+		}
+		i += size
 	}
 	return i
 }
 
 func commonSuffix(a, b string, prefix int) int {
 	i := 0
-	for i < len(a) - prefix && i < len(b) - prefix && a[len(a)-1-i] == b[len(b)-1-i] {
-		i++
+	for i < len(a) - prefix && i < len(b) - prefix {
+		ar, size := utf8.DecodeLastRuneInString(a[:len(a)-i])
+		br, _ := utf8.DecodeLastRuneInString(b[:len(b)-i])
+
+		if ar != br {
+			break
+		}
+
+		i += size
 	}
 	return i
 }
