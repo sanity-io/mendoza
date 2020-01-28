@@ -144,6 +144,7 @@ func (d *differ) reconstruct(idx int, reqs []request) {
 	// This is the index (into the hash list).
 
 	entry := d.right.Entries[idx]
+	insideMap := entry.Parent != -1 && d.right.Entries[entry.Parent].IsNonEmptyMap()
 	primaries := make([]int, 0, len(reqs))
 
 	for _, req := range reqs {
@@ -151,7 +152,7 @@ func (d *differ) reconstruct(idx int, reqs []request) {
 
 		if req.initialContext == -1 {
 			primaryIdx = 0
-		} else if entry.Reference.IsMapEntry() && d.left.IsNonEmptyMap(req.initialContext) {
+		} else if insideMap && d.left.Entries[req.initialContext].IsNonEmptyMap() {
 			for it := d.left.Iter(req.initialContext); !it.IsDone(); it.Next() {
 				key := it.GetKey()
 
@@ -171,12 +172,12 @@ func (d *differ) reconstruct(idx int, reqs []request) {
 		primaries = append(primaries, primaryIdx)
 	}
 
-	if d.right.IsNonEmptyMap(idx) {
+	if d.right.Entries[idx].IsNonEmptyMap() {
 		d.reconstructMap(idx, reqs, primaries)
 		return
 	}
 
-	if d.right.IsNonEmptySlice(idx) {
+	if d.right.Entries[idx].IsNonEmptySlice() {
 		d.reconstructSlice(idx, reqs, primaries)
 		return
 	}
@@ -193,13 +194,14 @@ func (d *differ) enterPatch(enter EnterType, idx int) Op {
 		return OpEnterRoot{enter}
 	}
 
-	ref := d.left.Entries[idx].Reference
+	entry := d.left.Entries[idx]
+	parentEntry := d.left.Entries[entry.Parent]
 
-	if ref.IsMapEntry() {
-		return OpEnterField{enter, ref.Index}
+	if parentEntry.IsNonEmptyMap() {
+		return OpEnterField{enter, entry.Reference.Index}
 	}
 
-	return OpEnterElement{enter, ref.Index}
+	return OpEnterElement{enter, entry.Reference.Index}
 }
 
 /*
@@ -329,11 +331,14 @@ func (d *differ) reconstructMap(idx int, reqs []request, primaries []int) {
 
 		for _, otherIdx := range d.hashIndex.Data[fieldEntry.Hash] {
 			otherEntry := d.left.Entries[otherIdx]
+			contextIdx := otherEntry.Parent
+			if contextIdx == -1 {
+				continue
+			}
+			contextEntry := d.left.Entries[contextIdx]
 
-			if otherEntry.Reference.IsMapEntry() {
-				contextIdx := otherEntry.Parent
-				contextEntry := d.left.Entries[contextIdx]
 
+			if contextEntry.IsNonEmptyMap() {
 				// Note: This what only makes us consider siblings as candidates
 				if reqIdx, ok := requestMapping[contextEntry.Parent]; ok {
 					cand, ok := candidates[contextIdx]
@@ -539,11 +544,13 @@ func (d *differ) reconstructSlice(idx int, reqs []request, primaries []int) {
 
 		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
 			otherEntry := d.left.Entries[otherIdx]
+			scope := otherEntry.Parent
+			if scope == -1 {
+				continue
+			}
+			scopeEntry := d.left.Entries[scope]
 
-			if otherEntry.Reference.IsSliceEntry() {
-				scope := otherEntry.Parent
-				scopeEntry := d.left.Entries[scope]
-
+			if scopeEntry.IsNonEmptySlice() {
 				// Note: This what only makes us only consider children of the contexts as candidates
 				if reqIdx, ok := requestMapping[scopeEntry.Parent]; ok {
 					cand, ok := candidates[scope]
@@ -636,9 +643,9 @@ func commonPrefix(a, b string) int {
 	return i
 }
 
-func commonSuffix(a, b string) int {
+func commonSuffix(a, b string, prefix int) int {
 	i := 0
-	for i < len(a) && i < len(b) && a[len(a)-1-i] == b[len(b)-1-i] {
+	for i < len(a) - prefix && i < len(b) - prefix && a[len(a)-1-i] == b[len(b)-1-i] {
 		i++
 	}
 	return i
@@ -670,7 +677,7 @@ func (d *differ) reconstructString(idx int, rightString string, reqs []request, 
 			size += 3
 		}
 
-		suffix := commonSuffix(leftString, rightString)
+		suffix := commonSuffix(leftString, rightString, prefix)
 
 		mid := rightString[prefix : len(rightString)-suffix]
 		if len(mid) > 0 {

@@ -33,14 +33,6 @@ func SliceEntryReference(idx int) Reference {
 	return Reference{Index: idx}
 }
 
-func (ref Reference) IsMapEntry() bool {
-	return len(ref.Key) != 0
-}
-
-func (ref Reference) IsSliceEntry() bool {
-	return len(ref.Key) == 0
-}
-
 type HashEntry struct {
 	Hash      Hash
 	Value     interface{}
@@ -50,27 +42,19 @@ type HashEntry struct {
 	Reference Reference
 }
 
+func (entry *HashEntry) IsNonEmptyMap() bool {
+	val, ok := entry.Value.(map[string]interface{})
+	return ok && len(val) > 0
+}
+
+func (entry *HashEntry) IsNonEmptySlice() bool {
+	val, ok := entry.Value.([]interface{})
+	return ok && len(val) > 0
+}
+
 func (hashList *HashList) AddDocument(obj interface{}) error {
 	_, _, err := hashList.process(-1, Reference{}, obj)
 	return err
-}
-
-func (hashList *HashList) IsNonEmptyMap(idx int) bool {
-	if len(hashList.Entries) <= idx+1 {
-		return false
-	}
-
-	nextEntry := hashList.Entries[idx+1]
-	return nextEntry.Parent == idx && nextEntry.Reference.IsMapEntry()
-}
-
-func (hashList *HashList) IsNonEmptySlice(idx int) bool {
-	if len(hashList.Entries) <= idx+1 {
-		return false
-	}
-
-	nextEntry := hashList.Entries[idx+1]
-	return nextEntry.Parent == idx && nextEntry.Reference.IsSliceEntry()
 }
 
 func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (result Hash, size int, err error) {
