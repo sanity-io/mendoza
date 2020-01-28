@@ -92,6 +92,10 @@ var Documents = []struct {
 		`{"":""}`,
 		`{"":"","0000":""}`,
 	},
+	{
+			`{"H":{"":{}}}`,
+			`{"H":0}`,
+	},
 }
 
 func TestRoundtrip(t *testing.T) {

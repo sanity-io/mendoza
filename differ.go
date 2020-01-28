@@ -356,13 +356,17 @@ func (d *differ) reconstructMap(idx int, reqs []request, primaries []int) {
 
 	// Also consider the primary elements
 	for reqIdx, primaryIdx := range primaries {
-		if primaryIdx != -1 {
-			cand, ok := candidates[primaryIdx]
-			if !ok {
-				cand.init(reqIdx)
-			}
-			candidates[primaryIdx] = cand
+		if primaryIdx == -1 {
+			continue
 		}
+		if !d.left.Entries[primaryIdx].IsNonEmptyMap() {
+			continue
+		}
+		cand, ok := candidates[primaryIdx]
+		if !ok {
+			cand.init(reqIdx)
+		}
+		candidates[primaryIdx] = cand
 	}
 
 	for contextIdx, cand := range candidates {
@@ -568,13 +572,17 @@ func (d *differ) reconstructSlice(idx int, reqs []request, primaries []int) {
 
 	// Always consider the primary elements
 	for reqIdx, primaryIdx := range primaries {
-		if primaryIdx != -1 {
-			cand, ok := candidates[primaryIdx]
-			if !ok {
-				cand.init(reqIdx)
-			}
-			candidates[primaryIdx] = cand
+		if primaryIdx == -1 {
+			continue
 		}
+		if !d.left.Entries[primaryIdx].IsNonEmptySlice() {
+			continue
+		}
+		cand, ok := candidates[primaryIdx]
+		if !ok {
+			cand.init(reqIdx)
+		}
+		candidates[primaryIdx] = cand
 	}
 
 	for contextIdx, cand := range candidates {
