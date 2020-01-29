@@ -85,7 +85,7 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 		result = HashString(obj)
 		size = len(obj) + 1
 	case map[string]interface{}:
-		hasher := HasherMap()
+		hasher := HasherMap
 		keys := sortedKeys(obj)
 
 		prevIdx := -1
@@ -112,7 +112,7 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 
 		result = hasher.Sum()
 	case []interface{}:
-		hasher := HasherSlice()
+		hasher := HasherSlice
 
 		prevIdx := -1
 

@@ -1,17 +1,16 @@
 package mendoza
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
-	"hash"
+	"github.com/sanity-io/mendoza/internal/sha256"
 	"math"
 )
 
 // 64-bit ought to be enough
-type Hash [8]byte
+type Hash [sha256.Size]byte
 
 type Hasher struct {
-	hasher hash.Hash
+	hasher sha256.Digest
 }
 
 type MapHasher interface {
@@ -34,24 +33,29 @@ const (
 	typeNull
 )
 
-func hasherFor(t byte) *Hasher {
-	h := &Hasher{
-		hasher: sha256.New(),
+func hasherFor(t byte) Hasher {
+	h := Hasher{
+		hasher: *sha256.New(),
 	}
 	h.hasher.Write([]byte{t})
 	return h
 }
 
 func hashFor(t byte) Hash {
-	return hasherFor(t).Sum()
+	h := hasherFor(t)
+	return h.Sum()
 }
 
 var HashTrue = hashFor(typeTrue)
 var HashFalse = hashFor(typeFalse)
 var HashNull = hashFor(typeNull)
+var HasherString = hasherFor(typeString)
+var HasherFloat = hasherFor(typeFloat)
+var HasherMap = hasherFor(typeMap)
+var HasherSlice = hasherFor(typeSlice)
 
 func HashString(s string) Hash {
-	h := hasherFor(typeString)
+	h := HasherString
 	h.hasher.Write([]byte(s))
 	return h.Sum()
 }
@@ -65,18 +69,8 @@ func HashFloat64(f float64) Hash {
 	return h.Sum()
 }
 
-func HasherMap() MapHasher {
-	return hasherFor(typeMap)
-}
-
-func HasherSlice() SliceHasher {
-	return hasherFor(typeSlice)
-}
-
-func (h *Hasher) Sum() (result Hash) {
-	fullSum := h.hasher.Sum(nil)
-	copy(result[:], fullSum)
-	return result
+func (h *Hasher) Sum() Hash {
+	return h.hasher.CheckSum()
 }
 
 func (h *Hasher) WriteField(key string, value Hash) {
