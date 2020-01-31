@@ -299,6 +299,28 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 		candidates = append(candidates, cand)
 	}
 
+	entry := d.right.Entries[idx]
+
+	// Use the xor-index to find fields that differ a bit
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		fieldEntry := it.GetEntry()
+
+		xorHash := entry.XorHash
+		xorHash.Xor(fieldEntry.Hash)
+
+		for _, otherIdx := range d.hashIndex.XorData[xorHash] {
+			otherEntry := d.left.Entries[otherIdx]
+
+			for i, req := range reqs {
+				if otherEntry.Parent == req.contextIdx && otherIdx != req.primaryIdx {
+					cand := mapCandidate{}
+					cand.init(otherIdx, i)
+					candidates = append(candidates, cand)
+				}
+			}
+		}
+	}
+
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		fieldEntry := it.GetEntry()
 		fieldRequests = append(fieldRequests, nil)

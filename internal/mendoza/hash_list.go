@@ -35,7 +35,7 @@ func SliceEntryReference(idx int) Reference {
 
 type HashEntry struct {
 	Hash      Hash
-	//XorHash   Hash
+	XorHash   Hash
 	Value     interface{}
 	Size      int
 	Parent    int
@@ -61,7 +61,7 @@ func (hashList *HashList) AddDocument(obj interface{}) error {
 func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (result Hash, size int, err error) {
 	current := len(hashList.Entries)
 
-	//var xorHash Hash
+	var xorHash Hash
 
 	hashList.Entries = append(hashList.Entries, HashEntry{
 		Parent:    parent,
@@ -111,7 +111,7 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 			prevIdx = entryIdx
 
 			hasher.WriteField(key, valueHash)
-			//xorHash.Xor(valueHash)
+			xorHash.Xor(valueHash)
 		}
 
 		result = hasher.Sum()
@@ -138,7 +138,6 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 			prevIdx = entryIdx
 
 			hasher.WriteElement(valueHash)
-			//xorHash.Xor(valueHash)
 		}
 
 		result = hasher.Sum()
@@ -149,7 +148,7 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 	entry := &hashList.Entries[current]
 	entry.Hash = result
 	entry.Size = size
-	//entry.XorHash = xorHash
+	entry.XorHash = xorHash
 
 	return result, size, nil
 }
