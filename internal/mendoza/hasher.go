@@ -13,6 +13,21 @@ type Hasher struct {
 	hasher sha256.Digest
 }
 
+func (h *Hash) Xor(other Hash) {
+	for i, b := range other {
+		h[i] ^= b
+	}
+}
+
+func (h Hash) IsNull() bool {
+	for _, b := range h {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 type MapHasher interface {
 	WriteField(key string, value Hash)
 	Sum() Hash

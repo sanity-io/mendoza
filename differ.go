@@ -100,8 +100,9 @@ func (d *differ) build() Patch {
 
 	reqs := []request{
 		{
-			initialContext: -1,
-			size:           root.Size + 1,
+			contextIdx: -1,
+			primaryIdx: 0,
+			size:       root.Size + 1,
 		},
 	}
 
@@ -117,10 +118,11 @@ func (d *differ) build() Patch {
 }
 
 type request struct {
-	initialContext int
-	size           int
-	patch          Patch
-	outputKey      string
+	contextIdx int
+	primaryIdx int
+	size       int
+	patch      Patch
+	outputKey  string
 }
 
 func (req *request) update(patch Patch, size int, outputKey string) {
@@ -136,66 +138,20 @@ func (d *differ) reconstruct(idx int, reqs []request) {
 		return
 	}
 
-	// Note that the context is the object _above_ the target.
-	// Example:
-	// - Context is (left document): {"_type": "person", "name": "Bob"}
-	// - Idx is (right document):    "Bob Bobson"
-	// However, in many cases it's most interesting to compare against is the field with the same key.
-	// We therefore first look at each request/context and find the "primary index".
-	// This is the index (into the hash list).
-
 	entry := d.right.Entries[idx]
-	insideMap := entry.Parent != -1 && d.right.Entries[entry.Parent].IsNonEmptyMap()
-	insideSlice := entry.Parent != -1 && d.right.Entries[entry.Parent].IsNonEmptySlice()
-	primaries := make([]int, 0, len(reqs))
 
-	for _, req := range reqs {
-		primaryIdx := -1
-
-		if req.initialContext == -1 {
-			primaryIdx = 0
-		} else if insideMap && d.left.Entries[req.initialContext].IsNonEmptyMap() {
-			for it := d.left.Iter(req.initialContext); !it.IsDone(); it.Next() {
-				key := it.GetKey()
-
-				if key == entry.Reference.Key {
-					// We found the same key
-					primaryIdx = it.GetIndex()
-					break
-				}
-
-				if key > entry.Reference.Key {
-					// Since the keys are iterated in sorted order we can stop here.
-					break
-				}
-			}
-		} else if insideSlice && d.left.Entries[req.initialContext].IsNonEmptySlice() {
-			for it := d.left.Iter(req.initialContext); !it.IsDone(); it.Next() {
-				idx := it.GetEntry().Reference.Index
-
-				if idx == entry.Reference.Index {
-					// We found the same key
-					primaryIdx = it.GetIndex()
-					break
-				}
-			}
-		}
-
-		primaries = append(primaries, primaryIdx)
-	}
-
-	if d.right.Entries[idx].IsNonEmptyMap() {
-		d.reconstructMap(idx, reqs, primaries)
+	if entry.IsNonEmptyMap() {
+		d.reconstructMap(idx, reqs)
 		return
 	}
 
-	if d.right.Entries[idx].IsNonEmptySlice() {
-		d.reconstructSlice(idx, reqs, primaries)
+	if entry.IsNonEmptySlice() {
+		d.reconstructSlice(idx, reqs)
 		return
 	}
 
 	if rightString, ok := entry.Value.(string); ok {
-		d.reconstructString(idx, rightString, reqs, primaries)
+		d.reconstructString(idx, rightString, reqs)
 		return
 	}
 }
@@ -238,49 +194,11 @@ In this case the 2 recursive calls are as follows:
 
 */
 
-type candidate interface {
-	// Is this candidate missing an exact value for the (right) reference?
-	IsMissing(reference mendoza.Reference) bool
-
-	// Registers the index of the request so that we can later extract the result.
-	RegisterRequest(childIdx int, childRef mendoza.Reference, reqIdx int)
-}
-
-func (d *differ) buildRequests(childReqs map[int][]request, contextIdx int, cand candidate) {
-	for childIdx, reqs := range childReqs {
-		child := d.right.Entries[childIdx]
-		if cand.IsMissing(child.Reference) {
-			req := request{
-				initialContext: contextIdx,
-				size:           child.Size + 1,
-			}
-			reqIdx := len(reqs)
-			childReqs[childIdx] = append(reqs, req)
-			cand.RegisterRequest(childIdx, child.Reference, reqIdx)
-		}
-	}
-}
-
-type mapRequestData struct {
-	candidates      map[int]*mapCandidate
-}
-
-func (reqData *mapRequestData) GetCandidate(contextIdx int) *mapCandidate {
-	cand, ok := reqData.candidates[contextIdx]
-	if !ok {
-		cand = &mapCandidate{}
-		cand.init(contextIdx)
-		reqData.candidates[contextIdx] = cand
-	}
-	return cand
-}
-
 // This stores information about each candidate map in the left-side document.
 type mapCandidate struct {
 	alias            map[string]mapAlias
 	seenKeys         map[string]struct{}
-	childReqsMapping map[int]int
-	commonSize       int
+	requestIdx       int
 	contextIdx       int
 }
 
@@ -289,18 +207,15 @@ type mapAlias struct {
 	sameKey  bool
 }
 
-func (mc *mapCandidate) init(contextIdx int) {
+func (mc *mapCandidate) init(contextIdx int, requestIdx int) {
 	mc.alias = make(map[string]mapAlias)
 	mc.seenKeys = make(map[string]struct{})
-	mc.childReqsMapping = make(map[int]int)
+	mc.requestIdx = requestIdx
 	mc.contextIdx = contextIdx
 }
 
 func (mc *mapCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
 	current, currentOk := mc.alias[target.Key]
-	if !currentOk {
-		mc.commonSize += size
-	}
 
 	mc.seenKeys[target.Key] = struct{}{}
 
@@ -337,134 +252,143 @@ func (mc *mapCandidate) IsMissing(reference mendoza.Reference) bool {
 
 func (mc *mapCandidate) RegisterRequest(childIdx int, childRef mendoza.Reference, reqIdx int) {
 	mc.seenKeys[childRef.Key] = struct{}{}
-	mc.childReqsMapping[childIdx] = reqIdx
 }
 
-func (d *differ) reconstructMap(idx int, reqs []request, primaries []int) {
+func (d *differ) reconstructMap(idx int, reqs []request) {
 	// right-index -> list of requests
-	fieldRequests := map[int][]request{}
+	fieldRequests := [][]request{}
 
-	requestData := make(map[int]mapRequestData)
-	for _, req := range reqs {
-		requestData[req.initialContext] = mapRequestData{
-			candidates: make(map[int]*mapCandidate),
+	// The input here is a list of requests. Each requests has _context_ and _primary_ which looks like this:
+	//
+	//   Left           Right
+	//     |
+	//   Context
+	//     |
+	//   Primary        Target
+	//
+	// The mandate of this method is to "assuming the program is currently in _context_; create a patch which
+	// produces _target_". Note that _primary_ is just a hint for where this method could look for differences.
+	// It's typically the field with same name, or an element in the same position. We can also assume that
+	// _primary_ is different from _target_ (otherwise why would you ask for the differences?).
+	//
+	// Note that context can either be an array or an object.
+
+	// Currently we're only looking at primary.
+
+	candidates := make([]mapCandidate, 0, len(reqs))
+
+	for i, req := range reqs {
+		if !d.left.Entries[req.primaryIdx].IsNonEmptyMap() {
+			continue
 		}
+
+		cand := mapCandidate{}
+		cand.init(req.primaryIdx, i)
+		candidates = append(candidates, cand)
 	}
 
-	// First search for possible common objects in different locations:
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		fieldEntry := it.GetEntry()
-		fieldIdx := it.GetIndex()
-
-		// Populate fieldRequests
-		fieldRequests[fieldIdx] = nil
+		fieldRequests = append(fieldRequests, nil)
 
 		for _, otherIdx := range d.hashIndex.Data[fieldEntry.Hash] {
 			otherEntry := d.left.Entries[otherIdx]
-			contextIdx := otherEntry.Parent
-			if contextIdx == -1 {
-				continue
-			}
-			contextEntry := d.left.Entries[contextIdx]
 
-			if contextEntry.IsNonEmptyMap() {
-				if reqData, ok := requestData[contextEntry.Parent]; ok {
-					cand := reqData.GetCandidate(contextIdx)
-					cand.insertAlias(fieldEntry.Reference, otherEntry.Reference, otherEntry.Size)
+			for candIdx := range candidates {
+				cand := &candidates[candIdx]
+				if cand.contextIdx == otherEntry.Parent {
+					cand.insertAlias(fieldEntry.Reference, otherEntry.Reference, fieldEntry.Size)
 				}
 			}
 		}
 	}
 
-	var candidates [][]*mapCandidate
+	// Now build the requests
+	for _, cand := range candidates {
+		contextIter := d.left.Iter(cand.contextIdx)
 
-	// Now go over request data, pick the best candidate
+		i := 0
+		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+			fieldEntry := it.GetEntry()
+			fieldKey := fieldEntry.Reference.Key
 
-	for reqIdx, req := range reqs {
-		reqData := requestData[req.initialContext]
+			cand.seenKeys[fieldKey] = struct{}{}
 
-		var bestCandiate, lockedCandidate *mapCandidate
-		var bestScore int
+			if _, ok := cand.alias[fieldKey]; !ok {
+				for !contextIter.IsDone() {
+					key := contextIter.GetKey()
 
-		// Always consider the primary element
-		primaryIdx := primaries[reqIdx]
-		if primaryIdx != -1 && d.left.Entries[primaryIdx].IsNonEmptyMap() {
-			lockedCandidate = reqData.GetCandidate(primaryIdx)
-		}
+					if key > fieldKey {
+						break
+					}
 
-		// Now find the best candidates
-		for _, cand := range reqData.candidates {
-			if cand != lockedCandidate && cand.commonSize > bestScore {
-				bestScore = cand.commonSize
-				bestCandiate = cand
-			}
-		}
+					if key == fieldKey {
+						fieldReqs := fieldRequests[i]
+						fieldReqs = append(fieldReqs, request{
+							contextIdx: cand.contextIdx,
+							primaryIdx: contextIter.GetIndex(),
+							size:       fieldEntry.Size + 1,
+						})
+						fieldRequests[i] = fieldReqs
+						break
+					}
 
-		var reqCandidates []*mapCandidate
-
-		if bestCandiate != nil {
-			reqCandidates = append(reqCandidates, bestCandiate)
-		}
-
-		if lockedCandidate != nil {
-			reqCandidates = append(reqCandidates, lockedCandidate)
-		}
-
-		candidates = append(candidates, reqCandidates)
-	}
-
-	for _, reqCandidates := range candidates {
-		for _, cand := range reqCandidates {
-			d.buildRequests(fieldRequests, cand.contextIdx, cand)
-		}
-	}
-
-	for fieldIdx, reqs := range fieldRequests {
-		d.reconstruct(fieldIdx, reqs)
-	}
-
-	for reqIdx, reqCandidates := range candidates {
-		for _, cand := range reqCandidates {
-
-			contextIdx := cand.contextIdx
-			size := 0
-			patch := Patch{}
-
-			removeKeys := map[string]int{}
-
-			for it := d.left.Iter(contextIdx); !it.IsDone(); it.Next() {
-				ref := it.GetEntry().Reference
-				if _, ok := cand.seenKeys[ref.Key]; ok {
-					// do nothing
-				} else {
-					removeKeys[ref.Key] = ref.Index
+					contextIter.Next()
 				}
 			}
+			i++
+		}
+	}
 
-			removeCount := len(removeKeys)
-			aliasCount := len(cand.alias)
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		d.reconstruct(it.GetIndex(), fieldRequests[it.GetEntry().Reference.Index])
+	}
 
-			enterMode := EnterBlank
+	for _, cand := range candidates {
+		primaryIdx := cand.contextIdx
 
-			if removeCount < aliasCount {
-				// Note: This doesn't currently take into account that we have two types of aliasing.
-				// It's shorter to alias a field with the same key (one single copy field).
-				// For now let's assume that the difference here is pretty small either way.
-				enterMode = EnterCopy
+		size := 0
+		patch := Patch{}
+
+		removeKeys := map[string]int{}
+
+		for it := d.left.Iter(primaryIdx); !it.IsDone(); it.Next() {
+			ref := it.GetEntry().Reference
+			if _, ok := cand.seenKeys[ref.Key]; ok {
+				// do nothing
+			} else {
+				removeKeys[ref.Key] = ref.Index
 			}
+		}
 
-			patch = append(patch, d.enterPatch(enterMode, contextIdx))
-			size += 2
+		removeCount := len(removeKeys)
+		aliasCount := len(cand.alias)
 
-			if enterMode == EnterCopy {
-				// Delete fields we don't need
-				for _, removeIdx := range removeKeys {
-					patch = append(patch, OpObjectDeleteField{removeIdx})
-					size += 2
-				}
+		enterMode := EnterBlank
+
+		if removeCount < aliasCount {
+			// Note: This doesn't currently take into account that we have two types of aliasing.
+			// It's shorter to alias a field with the same key (one single copy field).
+			// For now let's assume that the difference here is pretty small either way.
+			enterMode = EnterCopy
+		}
+
+		patch = append(patch, d.enterPatch(enterMode, primaryIdx))
+		size += 2
+
+		if enterMode == EnterCopy {
+			// Delete fields we don't need
+			for _, removeIdx := range removeKeys {
+				patch = append(patch, OpObjectDeleteField{removeIdx})
+				size += 2
 			}
+		}
 
-			for target, alias := range cand.alias {
+		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+			fieldEntry := it.GetEntry()
+			fieldKey := fieldEntry.Reference.Key
+
+			if alias, ok := cand.alias[fieldKey]; ok {
 				if alias.sameKey {
 					if enterMode == EnterBlank {
 						// We only need this if we're starting with a blank object
@@ -472,51 +396,49 @@ func (d *differ) reconstructMap(idx int, reqs []request, primaries []int) {
 						size += 2
 					}
 				} else {
-					patch = append(patch, OpEnterField{EnterCopy, alias.fieldIdx}, OpReturnIntoObject{target})
-					size += 2 + 1 + len(target)
+					patch = append(patch, OpEnterField{EnterCopy, alias.fieldIdx}, OpReturnIntoObject{fieldKey})
+					size += 2 + 1 + len(fieldKey)
 				}
-			}
+			} else {
+				didPatch := false
 
-			for fieldIdx, fieldRequestIdx := range cand.childReqsMapping {
-				fieldEntry := d.right.Entries[fieldIdx]
-				key := fieldEntry.Reference.Key
-				req := fieldRequests[fieldIdx][fieldRequestIdx]
+				// Not an alias. Look up the real diff.
+				for _, fieldReq := range fieldRequests[fieldEntry.Reference.Index] {
+					if fieldReq.contextIdx == cand.contextIdx {
+						// Match it up with the correct context
+						if fieldReq.patch != nil {
+							patch = append(patch, fieldReq.patch...)
+							size += fieldReq.size
 
-				if req.patch == nil {
-					patch = append(patch, OpObjectSetFieldValue{key, fieldEntry.Value})
-					size += 1 + len(key) + fieldEntry.Size
-				} else {
-					patch = append(patch, req.patch...)
-					size += req.size
+							if fieldReq.outputKey == fieldKey {
+								patch = append(patch, OpReturnIntoObjectKeyless{})
+								size += 1
+							} else {
+								patch = append(patch, OpReturnIntoObject{fieldKey})
+								size += 1 + len(fieldKey)
+							}
+							didPatch = true
+						}
 
-					if req.outputKey == key {
-						patch = append(patch, OpReturnIntoObjectKeyless{})
-						size += 1
-					} else {
-						patch = append(patch, OpReturnIntoObject{key})
-						size += 1 + len(key)
+						break
 					}
 				}
-			}
 
-			req := &reqs[reqIdx]
-			req.update(patch, size, d.left.Entries[contextIdx].Reference.Key)
+				if !didPatch {
+					patch = append(patch, OpObjectSetFieldValue{fieldKey, fieldEntry.Value})
+					size += 1 + len(fieldKey) + fieldEntry.Size
+				}
+			}
 		}
+
+
+		req := &reqs[cand.requestIdx]
+		req.update(patch, size, d.left.Entries[primaryIdx].Reference.Key)
 	}
 }
 
 type sliceRequestData struct {
-	candidates      map[int]*sliceCandidate
-}
-
-func (reqData *sliceRequestData) GetCandidate(contextIdx int) *sliceCandidate {
-	cand, ok := reqData.candidates[contextIdx]
-	if !ok {
-		cand = &sliceCandidate{}
-		cand.init(contextIdx)
-		reqData.candidates[contextIdx] = cand
-	}
-	return cand
+	candidates map[int]*sliceCandidate
 }
 
 type sliceAlias struct {
@@ -527,24 +449,14 @@ type sliceAlias struct {
 
 type sliceCandidate struct {
 	alias            map[int]sliceAlias
-	childReqsMapping map[int]int
-	commonSize       int
+	requestIdx       int
 	contextIdx       int
 }
 
-func (sc *sliceCandidate) init(contextIdx int) {
+func (sc *sliceCandidate) init(contextIdx int, requestIdx int) {
 	sc.alias = map[int]sliceAlias{}
-	sc.childReqsMapping = map[int]int{}
+	sc.requestIdx = requestIdx
 	sc.contextIdx = contextIdx
-}
-
-func (sc *sliceCandidate) IsMissing(reference mendoza.Reference) bool {
-	_, ok := sc.alias[reference.Index]
-	return !ok
-}
-
-func (sc *sliceCandidate) RegisterRequest(childIdx int, childRef mendoza.Reference, reqIdx int) {
-	sc.childReqsMapping[childIdx] = reqIdx
 }
 
 func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
@@ -552,9 +464,6 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 	// as you want to build the array.
 
 	current, ok := sc.alias[target.Index]
-	if !ok {
-		sc.commonSize += size
-	}
 
 	if ok && current.prevIsAdjacent {
 		// Once we've found something which is adjacent. Don't look any further.
@@ -595,136 +504,125 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 	}
 }
 
-func (d *differ) reconstructSlice(idx int, reqs []request, primaries []int) {
+func (d *differ) reconstructSlice(idx int, reqs []request) {
 	// right-index -> requests
-	elementRequests := map[int][]request{}
+	elementRequests := [][]request{}
 
-	requestData := make(map[int]sliceRequestData)
-	for _, req := range reqs {
-		requestData[req.initialContext] = sliceRequestData{
-			candidates: make(map[int]*sliceCandidate),
+	candidates := make([]sliceCandidate, 0, len(reqs))
+
+	for i, req := range reqs {
+		if !d.left.Entries[req.primaryIdx].IsNonEmptySlice() {
+			continue
 		}
+
+		cand := sliceCandidate{}
+		cand.init(req.primaryIdx, i)
+		candidates = append(candidates, cand)
 	}
 
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		elementEntry := it.GetEntry()
-		elementIdx := it.GetIndex()
-
-		// Populate elementRequests
-		elementRequests[elementIdx] = nil
+		elementRequests = append(elementRequests, nil)
 
 		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
 			otherEntry := d.left.Entries[otherIdx]
-			scope := otherEntry.Parent
-			if scope == -1 {
-				continue
-			}
-			scopeEntry := d.left.Entries[scope]
 
-			if scopeEntry.IsNonEmptySlice() {
-				if reqData, ok := requestData[scopeEntry.Parent]; ok {
-					cand := reqData.GetCandidate(scope)
-					cand.insertAlias(elementEntry.Reference, otherEntry.Reference, otherEntry.Size)
+			for candIdx := range candidates {
+				cand := &candidates[candIdx]
+				if cand.contextIdx == otherEntry.Parent {
+					cand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
 				}
 			}
 		}
 	}
 
-	var candidates [][]*sliceCandidate
+	// Now build the requests
+	for _, cand := range candidates {
+		contextIter := d.left.Iter(cand.contextIdx)
 
-	for reqIdx, req := range reqs {
-		reqData := requestData[req.initialContext]
-
-		var bestCandiate, lockedCandidate *sliceCandidate
-		var bestScore int
-
-		// Always consider the primary element
-		primaryIdx := primaries[reqIdx]
-		if primaryIdx != -1 && d.left.Entries[primaryIdx].IsNonEmptySlice() {
-			lockedCandidate = reqData.GetCandidate(primaryIdx)
-		}
-
-		// Now find the best candidates
-		for _, cand := range reqData.candidates {
-			if cand != lockedCandidate && cand.commonSize > bestScore {
-				bestScore = cand.commonSize
-				bestCandiate = cand
+		i := 0
+		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+			if contextIter.IsDone() {
+				break
 			}
-		}
 
-		var reqCandidates []*sliceCandidate
+			elementEntry := it.GetEntry()
 
-		if bestCandiate != nil {
-			reqCandidates = append(reqCandidates, bestCandiate)
-		}
+			if _, ok := cand.alias[elementEntry.Reference.Index]; !ok {
+				elementReqs := elementRequests[i]
+				elementReqs = append(elementReqs, request{
+					contextIdx: cand.contextIdx,
+					primaryIdx: contextIter.GetIndex(),
+					size:       elementEntry.Size + 1,
+				})
+				elementRequests[i] = elementReqs
 
-		if lockedCandidate != nil {
-			reqCandidates = append(reqCandidates, lockedCandidate)
-		}
+			}
 
-		candidates = append(candidates, reqCandidates)
-	}
-
-	for _, reqCandidates := range candidates {
-		for _, cand := range reqCandidates {
-			d.buildRequests(elementRequests, cand.contextIdx, cand)
+			i++
+			contextIter.Next()
 		}
 	}
 
-	for elementIdx, reqs := range elementRequests {
-		d.reconstruct(elementIdx, reqs)
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		d.reconstruct(it.GetIndex(), elementRequests[it.GetEntry().Reference.Index])
 	}
 
-	for reqIdx, reqCandidates := range candidates {
-		for _, cand := range reqCandidates {
+	for _, cand := range candidates {
+		contextIdx := cand.contextIdx
+		size := 0
+		patch := Patch{}
 
-			contextIdx := cand.contextIdx
-			size := 0
-			patch := Patch{}
+		patch = append(patch, d.enterPatch(EnterBlank, contextIdx))
+		size += 2
 
-			patch = append(patch, d.enterPatch(EnterBlank, contextIdx))
-			size += 2
+		startSlice := -1
 
-			startSlice := -1
+		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+			elementEntry := it.GetEntry()
+			pos := elementEntry.Reference.Index
 
-			for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-				elementIdx := it.GetIndex()
-				elementEntry := it.GetEntry()
-				pos := elementEntry.Reference.Index
+			if alias, ok := cand.alias[pos]; ok {
+				if startSlice == -1 {
+					startSlice = alias.elementIdx
+				}
 
-				if alias, ok := cand.alias[pos]; ok {
-					if startSlice == -1 {
-						startSlice = alias.elementIdx
-					}
-
-					if alias.nextIsAdjacent {
-						// The next one is adjacent. We don't need to do anything!
-					} else {
-						patch = append(patch, OpArrayAppendSlice{startSlice, alias.elementIdx + 1})
-						size += 3
-						startSlice = -1
-					}
+				if alias.nextIsAdjacent {
+					// The next one is adjacent. We don't need to do anything!
 				} else {
-					fieldRequestIdx := cand.childReqsMapping[elementIdx]
-					req := elementRequests[elementIdx][fieldRequestIdx]
-					if req.patch == nil {
-						patch = append(patch, OpArrayAppendValue{elementEntry.Value})
-						size += 1 + elementEntry.Size
-					} else {
-						patch = append(patch, req.patch...)
-						size += req.size
-						patch = append(patch, OpReturnIntoArray{})
-						size += 1
+					patch = append(patch, OpArrayAppendSlice{startSlice, alias.elementIdx + 1})
+					size += 3
+					startSlice = -1
+				}
+			} else {
+				didPatch := false
+
+				for _, elementReq := range elementRequests[pos] {
+					if elementReq.contextIdx == contextIdx {
+						if elementReq.patch != nil {
+							patch = append(patch, elementReq.patch...)
+							size += elementReq.size
+							patch = append(patch, OpReturnIntoArray{})
+							size += 1
+
+							didPatch = true
+						}
+
+						break
 					}
 				}
 
-				pos++
+				if !didPatch {
+					patch = append(patch, OpArrayAppendValue{elementEntry.Value})
+					size += 1 + elementEntry.Size
+				}
 			}
-
-			req := &reqs[reqIdx]
-			req.update(patch, size, d.left.Entries[contextIdx].Reference.Key)
 		}
+
+		req := &reqs[cand.requestIdx]
+		req.update(patch, size, d.left.Entries[contextIdx].Reference.Key)
 	}
+
 }
 
 // String handling
@@ -757,23 +655,23 @@ func commonSuffix(a, b string, prefix int) int {
 	return i
 }
 
-func (d *differ) reconstructString(idx int, rightString string, reqs []request, primaries []int) {
-	for reqIdx, primaryIdx := range primaries {
-		if primaryIdx == -1 {
-			continue
-		}
-
-		leftEntry := d.left.Entries[primaryIdx]
+func (d *differ) reconstructString(idx int, rightString string, reqs []request) {
+	for reqIdx, req := range reqs {
+		leftEntry := d.left.Entries[req.primaryIdx]
 
 		leftString, ok := leftEntry.Value.(string)
 		if !ok {
 			continue
 		}
 
+		if leftString == rightString {
+			panic("unnecessary reconstruction of string")
+		}
+
 		patch := Patch{}
 		size := 0
 
-		patch = append(patch, d.enterPatch(EnterBlank, primaryIdx))
+		patch = append(patch, d.enterPatch(EnterBlank, req.primaryIdx))
 		size += 2
 
 		prefix := commonPrefix(leftString, rightString)
@@ -797,6 +695,6 @@ func (d *differ) reconstructString(idx int, rightString string, reqs []request, 
 		}
 
 		req := &reqs[reqIdx]
-		req.update(patch, size, d.left.Entries[primaryIdx].Reference.Key)
+		req.update(patch, size, d.left.Entries[req.primaryIdx].Reference.Key)
 	}
 }
