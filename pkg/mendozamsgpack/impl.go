@@ -92,6 +92,8 @@ func (r reader) ReadValue() (interface{}, error) {
 func (patch *MsgpackPatch) DecodeMsgpack(dec *msgpack.Decoder) error {
 	r := reader{dec}
 
+	*patch = MsgpackPatch{}
+
 	for {
 		op, err := mendoza.ReadFrom(r)
 		if err == io.EOF {

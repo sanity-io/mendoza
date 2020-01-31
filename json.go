@@ -168,6 +168,8 @@ func (patch *Patch) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	*patch = Patch{}
+
 	for {
 		op, err := ReadFrom(&r)
 		if err == io.EOF {

@@ -13,6 +13,10 @@ type differ struct {
 
 // Creates a patch which can be applied to the left document to produce the right document.
 func CreatePatch(left, right interface{}) (Patch, error) {
+	if left == nil {
+		return Patch{OpEnterValue{right}}, nil
+	}
+
 	leftList, err := mendoza.HashListFor(left)
 	if err != nil {
 		return nil, err
@@ -34,6 +38,14 @@ func CreatePatch(left, right interface{}) (Patch, error) {
 // Creates two patches: The first can be applied to the left document to produce the right document,
 // the second can be applied to the right document to produce the left document.
 func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
+	if left == nil {
+		return Patch{OpEnterValue{right}}, Patch{OpEnterValue{nil}}, nil
+	}
+
+	if right == nil {
+		return Patch{OpEnterValue{nil}}, Patch{OpEnterValue{left}}, nil
+	}
+
 	leftList, err := mendoza.HashListFor(left)
 	if err != nil {
 		return nil, nil, err
@@ -95,7 +107,7 @@ func (d *differ) build() Patch {
 
 	if d.left.Entries[0].Hash == root.Hash {
 		// Exact same value
-		return Patch{OpEnterRoot{EnterCopy}}
+		return Patch{}
 	}
 
 	reqs := []request{
