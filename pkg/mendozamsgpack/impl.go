@@ -17,7 +17,14 @@ var _ msgpack.CustomDecoder = (*MsgpackPatch)(nil)
 // Marshal encodes a Mendoza patch using Msgpack.
 func Marshal(patch mendoza.Patch) ([]byte, error) {
 	mppatch := MsgpackPatch(patch)
-	return msgpack.Marshal(&mppatch)
+	b, err := msgpack.Marshal(&mppatch)
+	if err != nil {
+		return nil, err
+	}
+	if b == nil {
+		b = []byte{}
+	}
+	return b, err
 }
 
 // Marshal decodes a Mendoza patch using Msgpack.

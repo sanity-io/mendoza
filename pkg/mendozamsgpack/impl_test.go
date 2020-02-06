@@ -36,3 +36,10 @@ func TestRoundtrip(t *testing.T) {
 
 	require.EqualValues(t, patch, decodedPatch)
 }
+
+func TestEmptyPatch(t *testing.T) {
+	patch := mendoza.Patch{}
+	b, err := mendozamsgpack.Marshal(patch)
+	require.NoError(t, err)
+	require.NotNil(t, b)
+}
