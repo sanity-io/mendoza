@@ -27,17 +27,25 @@ type patcher struct {
 	root        interface{}
 	inputStack  []inputEntry
 	outputStack []outputEntry
+	options     *Options
 }
 
 // Applies a patch to a document. Note that this method can panic if
 // the document is the same that was used to produce the patch.
 func ApplyPatch(root interface{}, patch Patch) interface{} {
+	return DefaultOptions.ApplyPatch(root, patch)
+}
+
+// Applies a patch to a document. Note that this method can panic if
+// the document is the same that was used to produce the patch.
+func (options *Options) ApplyPatch(root interface{}, patch Patch) interface{} {
 	if len(patch) == 0 {
 		return root
 	}
 
 	p := patcher{
-		root: root,
+		root:    root,
+		options: options,
 	}
 
 	for _, op := range patch {
@@ -48,6 +56,10 @@ func ApplyPatch(root interface{}, patch Patch) interface{} {
 }
 
 func (patcher *patcher) enter(enterType EnterType, value interface{}, key string) {
+	if patcher.options.convertFunc != nil {
+		value = patcher.options.convertFunc(value)
+	}
+
 	patcher.inputStack = append(patcher.inputStack, inputEntry{
 		value: value,
 	})
@@ -198,7 +210,6 @@ func (patcher *patcher) outputString() *string {
 
 	return &entry.writableString
 }
-
 
 func (patcher *patcher) process(op Op) {
 	switch op := op.(type) {

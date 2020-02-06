@@ -9,19 +9,33 @@ type differ struct {
 	left      *mendoza.HashList
 	right     *mendoza.HashList
 	hashIndex *mendoza.HashIndex
+	options   *Options
 }
 
 // Creates a patch which can be applied to the left document to produce the right document.
+// This function uses the default options.
 func CreatePatch(left, right interface{}) (Patch, error) {
+	return DefaultOptions.CreatePatch(left, right)
+}
+
+// Creates two patches: The first can be applied to the left document to produce the right document,
+// the second can be applied to the right document to produce the left document.
+// This function uses the default options.
+func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
+	return DefaultOptions.CreateDoublePatch(left, right)
+}
+
+// Creates a patch which can be applied to the left document to produce the right document.
+func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
 	if left == nil {
 		return Patch{OpEnterValue{right}}, nil
 	}
 
-	leftList, err := mendoza.HashListFor(left)
+	leftList, err := mendoza.HashListFor(left, options.convertFunc)
 	if err != nil {
 		return nil, err
 	}
-	rightList, err := mendoza.HashListFor(right)
+	rightList, err := mendoza.HashListFor(right, options.convertFunc)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +51,7 @@ func CreatePatch(left, right interface{}) (Patch, error) {
 
 // Creates two patches: The first can be applied to the left document to produce the right document,
 // the second can be applied to the right document to produce the left document.
-func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
+func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 	if left == nil {
 		return Patch{OpEnterValue{right}}, Patch{OpEnterValue{nil}}, nil
 	}
@@ -46,11 +60,11 @@ func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 		return Patch{OpEnterValue{nil}}, Patch{OpEnterValue{left}}, nil
 	}
 
-	leftList, err := mendoza.HashListFor(left)
+	leftList, err := mendoza.HashListFor(left, options.convertFunc)
 	if err != nil {
 		return nil, nil, err
 	}
-	rightList, err := mendoza.HashListFor(right)
+	rightList, err := mendoza.HashListFor(right, options.convertFunc)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -60,6 +74,7 @@ func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 		left:      leftList,
 		right:     rightList,
 		hashIndex: leftHashIndex,
+		options:options,
 	}
 
 	rightHashIndex := mendoza.NewHashIndex(rightList)
@@ -67,6 +82,7 @@ func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 		left:      rightList,
 		right:     leftList,
 		hashIndex: rightHashIndex,
+		options:options,
 	}
 	return leftDiffer.build(), rightDiffer.build(), nil
 }

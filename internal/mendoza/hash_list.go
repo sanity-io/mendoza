@@ -1,7 +1,7 @@
 package mendoza
 
 import (
-	"errors"
+	"fmt"
 	"sort"
 )
 
@@ -9,10 +9,11 @@ import (
 // to quickly find equivalent sub trees.
 type HashList struct {
 	Entries []HashEntry
+	convertFunc func(value interface{}) interface{}
 }
 
-func HashListFor(doc interface{}) (*HashList, error) {
-	hashList := &HashList{}
+func HashListFor(doc interface{}, convertFunc func(value interface{}) interface{}) (*HashList, error) {
+	hashList := &HashList{convertFunc: convertFunc}
 	err := hashList.AddDocument(doc)
 	if err != nil {
 		return nil, err
@@ -62,6 +63,10 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 	current := len(hashList.Entries)
 
 	var xorHash Hash
+
+	if hashList.convertFunc != nil {
+		obj = hashList.convertFunc(obj)
+	}
 
 	hashList.Entries = append(hashList.Entries, HashEntry{
 		Parent:    parent,
@@ -142,7 +147,7 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 
 		result = hasher.Sum()
 	default:
-		return result, size, errors.New("unsupported type")
+		return result, size, fmt.Errorf("unsupported type: %T", obj)
 	}
 
 	entry := &hashList.Entries[current]
