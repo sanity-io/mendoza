@@ -1,5 +1,7 @@
 package mendoza
 
+import "fmt"
+
 // Writer is an interface for writing values. This can be used for supporting a custom serialization format.
 type Writer interface {
 	WriteUint8(v uint8) error
@@ -8,7 +10,7 @@ type Writer interface {
 	WriteValue(v interface{}) error
 }
 
-// Writer is an interface for reading values. This can be used for supporting a custom serialization format.
+// Reader is an interface for reading values. This can be used for supporting a custom serialization format.
 type Reader interface {
 	ReadUint8() (uint8, error)
 	ReadUint() (int, error)
@@ -52,6 +54,7 @@ const (
 	codeStringAppendSlice
 )
 
+// Reads a single operation from a reader.
 func ReadFrom(r Reader) (Op, error) {
 	code, err := r.ReadUint8()
 	if err != nil {
@@ -108,6 +111,8 @@ func ReadFrom(r Reader) (Op, error) {
 		op = &OpStringAppendString{}
 	case codeStringAppendSlice:
 		op = &OpStringAppendSlice{}
+	default:
+		return nil, fmt.Errorf("unknown opcode: %d", code)
 	}
 
 	err = op.readParams(r)
@@ -117,7 +122,7 @@ func ReadFrom(r Reader) (Op, error) {
 	return op, nil
 }
 
-// Writes a single operation
+// Writes a single operation to a writer.
 func WriteTo(w Writer, op Op) error {
 	var code uint8
 

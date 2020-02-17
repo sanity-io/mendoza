@@ -13,6 +13,7 @@ type differ struct {
 }
 
 // Creates a patch which can be applied to the left document to produce the right document.
+//
 // This function uses the default options.
 func CreatePatch(left, right interface{}) (Patch, error) {
 	return DefaultOptions.CreatePatch(left, right)
@@ -20,6 +21,7 @@ func CreatePatch(left, right interface{}) (Patch, error) {
 
 // Creates two patches: The first can be applied to the left document to produce the right document,
 // the second can be applied to the right document to produce the left document.
+//
 // This function uses the default options.
 func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 	return DefaultOptions.CreateDoublePatch(left, right)

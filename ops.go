@@ -1,7 +1,28 @@
+// This package implements a Mendoza differ and patcher.
+//
+// You use CreatePatch (or CreateDoublePatch) to create patches,
+// which can then be applied with ApplyPatch.
+//
+// The Patch type is already JSON serializable, but you can implement Reader/Writer
+// (and use WriteTo/ReadFrom) if you need a custom serialization.
+//
+// Supported types
+//
+// The differ/patcher is only implemented to work on the following types:
+//  bool
+//  float64
+//  string
+//  map[string]interface{}
+//  []interface{}
+//  nil
+//
+// If you need to support additional types you can use the option WithConvertFunc which
+// defines a function that is applied to every value.
 package mendoza
 
 //go-sumtype:decl Op
 
+// Op is the interface for an operation.
 type Op interface {
 	applyTo(p *patcher)
 	readParams(r Reader) error

@@ -30,13 +30,15 @@ type patcher struct {
 }
 
 // Applies a patch to a document. Note that this method can panic if
-// the document is the same that was used to produce the patch.
+// the document is not the same that was used to produce the patch.
+//
+// This function uses the default options.
 func ApplyPatch(root interface{}, patch Patch) interface{} {
 	return DefaultOptions.ApplyPatch(root, patch)
 }
 
 // Applies a patch to a document. Note that this method can panic if
-// the document is the same that was used to produce the patch.
+// the document is not the same that was used to produce the patch.
 func (options *Options) ApplyPatch(root interface{}, patch Patch) interface{} {
 	if len(patch) == 0 {
 		return root
