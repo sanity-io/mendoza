@@ -502,7 +502,7 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 							size += fieldReq.size
 
 							if fieldReq.outputKey == fieldKey {
-								patch = append(patch, &OpReturnIntoObjectKeylessPop{})
+								patch = append(patch, &OpReturnIntoObjectSameKeyPop{})
 								size += 1
 							} else {
 								patch = append(patch, &OpReturnIntoObjectPop{OpReturnIntoObject: OpReturnIntoObject{fieldKey}})

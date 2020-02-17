@@ -207,7 +207,7 @@ func (op OpReturnIntoObject) applyTo(p *patcher) {
 	obj[op.Key] = result
 }
 
-func (op OpReturnIntoObjectKeyless) applyTo(p *patcher) {
+func (op OpReturnIntoObjectSameKey) applyTo(p *patcher) {
 	key := p.inputEntry().key
 	result := p.outputEntry().result()
 	p.popOutput()
@@ -279,8 +279,8 @@ func (op OpReturnIntoObjectPop) applyTo(p *patcher) {
 	op.OpPop.applyTo(p)
 }
 
-func (op OpReturnIntoObjectKeylessPop) applyTo(p *patcher) {
-	op.OpReturnIntoObjectKeyless.applyTo(p)
+func (op OpReturnIntoObjectSameKeyPop) applyTo(p *patcher) {
+	op.OpReturnIntoObjectSameKey.applyTo(p)
 	op.OpPop.applyTo(p)
 }
 
@@ -297,7 +297,7 @@ func (op OpObjectSetFieldValue) applyTo(p *patcher) {
 func (op OpObjectCopyField) applyTo(p *patcher) {
 	op.OpPushField.applyTo(p)
 	op.OpCopy.applyTo(p)
-	op.OpReturnIntoObjectKeyless.applyTo(p)
+	op.OpReturnIntoObjectSameKey.applyTo(p)
 	op.OpPop.applyTo(p)
 }
 

@@ -49,7 +49,7 @@ type OpReturnIntoObject struct {
 	Key string
 }
 
-type OpReturnIntoObjectKeyless struct {
+type OpReturnIntoObjectSameKey struct {
 }
 
 type OpReturnIntoArray struct {
@@ -100,8 +100,8 @@ type OpReturnIntoObjectPop struct {
 	OpPop
 }
 
-type OpReturnIntoObjectKeylessPop struct {
-	OpReturnIntoObjectKeyless
+type OpReturnIntoObjectSameKeyPop struct {
+	OpReturnIntoObjectSameKey
 	OpPop
 }
 
@@ -120,7 +120,7 @@ type OpObjectSetFieldValue struct {
 type OpObjectCopyField struct {
 	OpPushField
 	OpCopy
-	OpReturnIntoObjectKeyless
+	OpReturnIntoObjectSameKey
 	OpPop
 }
 

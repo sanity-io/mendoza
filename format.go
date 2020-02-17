@@ -27,7 +27,7 @@ const (
 
 	codeReturnIntoArray
 	codeReturnIntoObject
-	codeReturnIntoObjectKeyless
+	codeReturnIntoObjectSameKey
 
 	codePushField
 	codePushElement
@@ -40,7 +40,7 @@ const (
 	codePushElementBlank
 
 	codeReturnIntoObjectPop
-	codeReturnIntoObjectKeylessPop
+	codeReturnIntoObjectSameKeyPop
 	codeReturnIntoArrayPop
 
 	codeObjectSetFieldValue
@@ -73,8 +73,8 @@ func ReadFrom(r Reader) (Op, error) {
 		op = &OpReturnIntoArray{}
 	case codeReturnIntoObject:
 		op = &OpReturnIntoObject{}
-	case codeReturnIntoObjectKeyless:
-		op = &OpReturnIntoObjectKeyless{}
+	case codeReturnIntoObjectSameKey:
+		op = &OpReturnIntoObjectSameKey{}
 	case codePushField:
 		op = &OpPushField{}
 	case codePushElement:
@@ -93,8 +93,8 @@ func ReadFrom(r Reader) (Op, error) {
 		op = &OpPushElementBlank{}
 	case codeReturnIntoObjectPop:
 		op = &OpReturnIntoObjectPop{}
-	case codeReturnIntoObjectKeylessPop:
-		op = &OpReturnIntoObjectKeylessPop{}
+	case codeReturnIntoObjectSameKeyPop:
+		op = &OpReturnIntoObjectSameKeyPop{}
 	case codeReturnIntoArrayPop:
 		op = &OpReturnIntoArrayPop{}
 	case codeObjectSetFieldValue:
@@ -137,8 +137,8 @@ func WriteTo(w Writer, op Op) error {
 		code = codeReturnIntoArray
 	case *OpReturnIntoObject:
 		code = codeReturnIntoObject
-	case *OpReturnIntoObjectKeyless:
-		code = codeReturnIntoObjectKeyless
+	case *OpReturnIntoObjectSameKey:
+		code = codeReturnIntoObjectSameKey
 	case *OpPushField:
 		code = codePushField
 	case *OpPushElement:
@@ -157,8 +157,8 @@ func WriteTo(w Writer, op Op) error {
 		code = codePushElementBlank
 	case *OpReturnIntoObjectPop:
 		code = codeReturnIntoObjectPop
-	case *OpReturnIntoObjectKeylessPop:
-		code = codeReturnIntoObjectKeylessPop
+	case *OpReturnIntoObjectSameKeyPop:
+		code = codeReturnIntoObjectSameKeyPop
 	case *OpReturnIntoArrayPop:
 		code = codeReturnIntoArrayPop
 	case *OpObjectSetFieldValue:
@@ -241,11 +241,11 @@ func (op *OpReturnIntoObject) writeParams(w Writer) (err error) {
 	return
 }
 
-func (op *OpReturnIntoObjectKeyless) readParams(r Reader) (err error) {
+func (op *OpReturnIntoObjectSameKey) readParams(r Reader) (err error) {
 	return
 }
 
-func (op *OpReturnIntoObjectKeyless) writeParams(w Writer) (err error) {
+func (op *OpReturnIntoObjectSameKey) writeParams(w Writer) (err error) {
 	return
 }
 
@@ -347,11 +347,11 @@ func (op *OpReturnIntoObjectPop) writeParams(w Writer) (err error) {
 	return
 }
 
-func (op *OpReturnIntoObjectKeylessPop) readParams(r Reader) (err error) {
+func (op *OpReturnIntoObjectSameKeyPop) readParams(r Reader) (err error) {
 	return
 }
 
-func (op *OpReturnIntoObjectKeylessPop) writeParams(w Writer) (err error) {
+func (op *OpReturnIntoObjectSameKeyPop) writeParams(w Writer) (err error) {
 	return
 }
 

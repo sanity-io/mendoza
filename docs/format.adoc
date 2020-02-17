@@ -128,10 +128,10 @@ The following example will modify the zip code in a nested object:
 - `PushFieldCopy("user")`
 - `PushFieldCopy("address")`
 - `SetFieldValue("zip", 1234)`
-- `ReturnIntoObjectKeylessPop()`
-- `ReturnIntoObjectKeylessPop()`
+- `ReturnIntoObjectSameKeyPop()`
+- `ReturnIntoObjectSameKeyPop()`
 
-Note that entering a field remembers the key where it come from, which `ReturnIntoObjectKeyless()` then uses to set it.
+Note that entering a field remembers the key where it come from, which `ReturnIntoObjectSameKey()` then uses to set it.
 
 ### Dealing with arrays
 
@@ -141,7 +141,7 @@ Arrays are typically dealt with by pushing with a blank value and then using `Ar
 - `PushFieldBlank("skills")`
 - `ArrayAppendSlice(0, 2)`
 - `ArrayAppendValue("Go")`
-- `ReturnIntoObjectKeylessPop()`
+- `ReturnIntoObjectSameKeyPop()`
 
 ## List of primitive operations
 
@@ -194,13 +194,13 @@ The `OpReturnIntoObject` operation takes the current output value, pops the outp
 The new output value must be an object.
 
 
-[[OpReturnIntoObjectKeyless]]
-### `ReturnIntoObjectKeyless` operation
+[[OpReturnIntoObjectSameKey]]
+### `ReturnIntoObjectSameKey` operation
 
 .Parameters
 _None_
 
-The `OpReturnIntoObjectKeyless` operation first finds the key that was used to push the current input value (see <<OpPushField,PushField>>),
+The `OpReturnIntoObjectSameKey` operation first finds the key that was used to push the current input value (see <<OpPushField,PushField>>),
 then it takes the current output value, pops the output stack, and stores it on the new output value (i.e. the value before it in the stack) with the given key.
 The new output value must be an object.
 
@@ -212,7 +212,7 @@ The new output value must be an object.
 
 The `PushField` operation looks up a field in the input value (which must an object), and then pushes the value onto the input stack.
 `keyIdx` refers to the _nth_ key (after you sort them lexically) in the object.
-The key is stored together with the value in the input stack so that <<OpReturnIntoObjectKeyless,ReturnIntoObjectKeyless>> can access it later.
+The key is stored together with the value in the input stack so that <<OpReturnIntoObjectSameKey,ReturnIntoObjectSameKey>> can access it later.
 
 [[OpPushElement]]
 ### `PushElement` operation
@@ -316,7 +316,7 @@ The indices refers to _byte offsets_ in UTF-8 encoding.
 |
 
 |5
-|<<OpReturnIntoObjectKeyless,ReturnIntoObjectKeyless>>
+|<<OpReturnIntoObjectSameKey,ReturnIntoObjectSameKey>>
 |Output
 |
 
@@ -366,9 +366,9 @@ The indices refers to _byte offsets_ in UTF-8 encoding.
 |<<OpReturnIntoObject,ReturnIntoObject>> + <<OpPop,Pop>>
 
 |15
-|ReturnIntoObjectKeylessPop
+|ReturnIntoObjectSameKeyPop
 |Composite
-|<<OpReturnIntoObjectKeyless,ReturnIntoObjectKeyless>> + <<OpPop,Pop>>
+|<<OpReturnIntoObjectSameKey,ReturnIntoObjectSameKey>> + <<OpPop,Pop>>
 
 |15
 |ReturnIntoArrayPop
@@ -383,7 +383,7 @@ The indices refers to _byte offsets_ in UTF-8 encoding.
 |17
 |ObjectCopyField
 |Composite
-|<<OpPushField,PushField>> + <<OpCopy,Copy>> + <<OpReturnIntoObjectKeyless,ReturnIntoObjectKeyless>> + <<OpPop,Pop>>
+|<<OpPushField,PushField>> + <<OpCopy,Copy>> + <<OpReturnIntoObjectSameKey,ReturnIntoObjectSameKey>> + <<OpPop,Pop>>
 
 |18
 |<<OpObjectDeleteField,ObjectDeleteField>>
