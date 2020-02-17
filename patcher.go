@@ -1,12 +1,10 @@
 package mendoza
 
 import (
-	"fmt"
 	"sort"
 )
 
 type outputEntry struct {
-	key            string
 	source         interface{}
 	writableArray  []interface{}
 	writableObject map[string]interface{}
@@ -14,6 +12,7 @@ type outputEntry struct {
 }
 
 type inputEntry struct {
+	key    string
 	value  interface{}
 	fields []fieldEntry
 }
@@ -43,56 +42,21 @@ func (options *Options) ApplyPatch(root interface{}, patch Patch) interface{} {
 		return root
 	}
 
+	if options.convertFunc != nil {
+		root = options.convertFunc(root)
+	}
+
 	p := patcher{
-		root:    root,
-		options: options,
+		options:     options,
+		inputStack:  []inputEntry{{value: root}},
+		outputStack: []outputEntry{{source: root}},
 	}
 
 	for _, op := range patch {
-		p.process(op)
+		op.applyTo(&p)
 	}
 
 	return p.result()
-}
-
-func (patcher *patcher) enter(enterType EnterType, value interface{}, key string) {
-	if patcher.options.convertFunc != nil {
-		value = patcher.options.convertFunc(value)
-	}
-
-	patcher.inputStack = append(patcher.inputStack, inputEntry{
-		value: value,
-	})
-
-	switch enterType {
-	case EnterNop:
-		// do nothing
-	case EnterCopy:
-		patcher.outputStack = append(patcher.outputStack, outputEntry{
-			key:    key,
-			source: value,
-		})
-	case EnterBlank:
-		patcher.outputStack = append(patcher.outputStack, outputEntry{
-			key: key,
-		})
-	}
-}
-
-func (patcher *patcher) returnIntoField(key string) {
-	patcher.inputStack = patcher.inputStack[:len(patcher.inputStack)-1]
-
-	// Read the current value, then pop the stack
-	entry := patcher.outputStack[len(patcher.outputStack)-1]
-	patcher.outputStack = patcher.outputStack[:len(patcher.outputStack)-1]
-
-	obj := patcher.outputObject()
-
-	if key == "" {
-		key = entry.key
-	}
-
-	obj[key] = entry.result()
 }
 
 func (patcher *patcher) popInput() {
@@ -104,6 +68,10 @@ func (patcher *patcher) popOutput() {
 }
 
 func (patcher *patcher) inputEntry() *inputEntry {
+	if len(patcher.inputStack) == 0 {
+
+	}
+
 	return &patcher.inputStack[len(patcher.inputStack)-1]
 }
 
@@ -211,65 +179,150 @@ func (patcher *patcher) outputString() *string {
 	return &entry.writableString
 }
 
-func (patcher *patcher) process(op Op) {
-	switch op := op.(type) {
-	case OpEnterValue:
-		patcher.outputStack = append(patcher.outputStack, outputEntry{
-			source: op.Value,
-		})
-	case OpEnterRoot:
-		patcher.enter(op.Enter, patcher.root, "")
-	case OpEnterField:
-		field := patcher.inputEntry().getField(op.Index)
-		patcher.enter(op.Enter, field.value, field.key)
-	case OpEnterElement:
-		arr := patcher.inputArray()
-		value := arr[op.Index]
-		patcher.enter(op.Enter, value, "")
-	case OpReturnIntoObject:
-		patcher.popInput()
-		entry := *patcher.outputEntry()
-		patcher.popOutput()
-		obj := patcher.outputObject()
-		obj[op.Key] = entry.result()
-	case OpReturnIntoObjectKeyless:
-		patcher.popInput()
-		entry := *patcher.outputEntry()
-		patcher.popOutput()
-		obj := patcher.outputObject()
-		obj[entry.key] = entry.result()
-	case OpReturnIntoArray:
-		patcher.popInput()
-		entry := *patcher.outputEntry()
-		patcher.popOutput()
-		arr := patcher.outputArray()
-		*arr = append(*arr, entry.result())
-	case OpObjectSetFieldValue:
-		obj := patcher.outputObject()
-		obj[op.Key] = op.Value
-	case OpObjectCopyField:
-		field := patcher.inputEntry().getField(op.Index)
-		obj := patcher.outputObject()
-		obj[field.key] = field.value
-	case OpObjectDeleteField:
-		field := patcher.inputEntry().getField(op.Index)
-		obj := patcher.outputObject()
-		delete(obj, field.key)
-	case OpArrayAppendValue:
-		arr := patcher.outputArray()
-		*arr = append(*arr, op.Value)
-	case OpArrayAppendSlice:
-		src := patcher.inputArray()
-		arr := patcher.outputArray()
-		*arr = append(*arr, src[op.Left:op.Right]...)
-	case OpStringAppendString:
-		str := patcher.outputString()
-		*str = *str + op.String
-	case OpStringAppendSlice:
-		src := patcher.inputString()
-		str := patcher.outputString()
-		*str = *str + src[op.Left:op.Right]
-	default:
-		panic(fmt.Errorf("unknown op: %#v", op))
+func (op OpValue) applyTo(p *patcher) {
+	p.outputStack = append(p.outputStack, outputEntry{
+		source: op.Value,
+	})
+}
+
+func (op OpCopy) applyTo(p *patcher) {
+	input := p.inputEntry()
+	p.outputStack = append(p.outputStack, outputEntry{
+		source: input.value,
+	})
+}
+
+func (op OpBlank) applyTo(p *patcher) {
+	p.outputStack = append(p.outputStack, outputEntry{
+		source: nil,
+	})
+}
+
+func (op OpReturnIntoObject) applyTo(p *patcher) {
+	result := p.outputEntry().result()
+	p.popOutput()
+	obj := p.outputObject()
+	obj[op.Key] = result
+}
+
+func (op OpReturnIntoObjectKeyless) applyTo(p *patcher) {
+	key := p.inputEntry().key
+	result := p.outputEntry().result()
+	p.popOutput()
+	obj := p.outputObject()
+	obj[key] = result
+}
+
+func (op OpReturnIntoArray) applyTo(p *patcher) {
+	result := p.outputEntry().result()
+	p.popOutput()
+	arr := p.outputArray()
+	*arr = append(*arr, result)
+}
+
+func (op OpPushField) applyTo(p *patcher) {
+	field := p.inputEntry().getField(op.Index)
+	value := field.value
+	if p.options.convertFunc != nil {
+		value = p.options.convertFunc(value)
 	}
+	p.inputStack = append(p.inputStack, inputEntry{
+		key:   field.key,
+		value: value,
+	})
+}
+
+func (op OpPushElement) applyTo(p *patcher) {
+	value := p.inputArray()[op.Index]
+	if p.options.convertFunc != nil {
+		value = p.options.convertFunc(value)
+	}
+	p.inputStack = append(p.inputStack, inputEntry{
+		value: value,
+	})
+}
+
+func (op OpPushParent) applyTo(p *patcher) {
+	idx := len(p.inputStack) - 2 - op.N
+	entry := p.inputStack[idx]
+	p.inputStack = append(p.inputStack, entry)
+}
+
+func (op OpPop) applyTo(p *patcher) {
+	p.popInput()
+}
+
+func (op OpPushFieldCopy) applyTo(p *patcher) {
+	op.OpPushField.applyTo(p)
+	op.OpCopy.applyTo(p)
+}
+
+func (op OpPushFieldBlank) applyTo(p *patcher) {
+	op.OpPushField.applyTo(p)
+	op.OpBlank.applyTo(p)
+}
+
+func (op OpPushElementCopy) applyTo(p *patcher) {
+	op.OpPushElement.applyTo(p)
+	op.OpCopy.applyTo(p)
+}
+
+func (op OpPushElementBlank) applyTo(p *patcher) {
+	op.OpPushElement.applyTo(p)
+	op.OpBlank.applyTo(p)
+}
+
+func (op OpReturnIntoObjectPop) applyTo(p *patcher) {
+	op.OpReturnIntoObject.applyTo(p)
+	op.OpPop.applyTo(p)
+}
+
+func (op OpReturnIntoObjectKeylessPop) applyTo(p *patcher) {
+	op.OpReturnIntoObjectKeyless.applyTo(p)
+	op.OpPop.applyTo(p)
+}
+
+func (op OpReturnIntoArrayPop) applyTo(p *patcher) {
+	op.OpReturnIntoArray.applyTo(p)
+	op.OpPop.applyTo(p)
+}
+
+func (op OpObjectSetFieldValue) applyTo(p *patcher) {
+	op.OpValue.applyTo(p)
+	op.OpReturnIntoObject.applyTo(p)
+}
+
+func (op OpObjectCopyField) applyTo(p *patcher) {
+	op.OpPushField.applyTo(p)
+	op.OpCopy.applyTo(p)
+	op.OpReturnIntoObjectKeyless.applyTo(p)
+	op.OpPop.applyTo(p)
+}
+
+func (op OpObjectDeleteField) applyTo(p *patcher) {
+	field := p.inputEntry().getField(op.Index)
+	obj := p.outputObject()
+	delete(obj, field.key)
+}
+
+func (op OpArrayAppendValue) applyTo(p *patcher) {
+	arr := p.outputArray()
+	*arr = append(*arr, op.Value)
+}
+
+func (op OpArrayAppendSlice) applyTo(p *patcher) {
+	src := p.inputArray()
+	arr := p.outputArray()
+	*arr = append(*arr, src[op.Left:op.Right]...)
+}
+
+func (op OpStringAppendString) applyTo(p *patcher) {
+	str := p.outputString()
+	*str = *str + op.String
+}
+
+func (op OpStringAppendSlice) applyTo(p *patcher) {
+	src := p.inputString()
+	str := p.outputString()
+	*str = *str + src[op.Left:op.Right]
 }

@@ -1,7 +1,5 @@
 package mendoza
 
-import "fmt"
-
 // Writer is an interface for writing values. This can be used for supporting a custom serialization format.
 type Writer interface {
 	WriteUint8(v uint8) error
@@ -21,292 +19,171 @@ type Reader interface {
 // Note: This code is intentionally very verbose/repetitive in order to be forward compatible.
 
 const (
-	codeEnterValue uint8 = iota
-
-	codeEnterRootNop
-	codeEnterRootCopy
-	codeEnterRootBlank
-
-	codeEnterFieldNop
-	codeEnterFieldCopy
-	codeEnterFieldBlank
-
-	codeEnterElementNop
-	codeEnterElementCopy
-	codeEnterElementBlank
+	codeValue uint8 = iota
+	codeCopy
+	codeBlank
 
 	codeReturnIntoArray
 	codeReturnIntoObject
 	codeReturnIntoObjectKeyless
+
+	codePushField
+	codePushElement
+	codePushParent
+	codePop
+
+	codePushFieldCopy
+	codePushFieldBlank
+	codePushElementCopy
+	codePushElementBlank
+
+	codeReturnIntoObjectPop
+	codeReturnIntoObjectKeylessPop
+	codeReturnIntoArrayPop
 
 	codeObjectSetFieldValue
 	codeObjectCopyField
 	codeObjectDeleteField
 
 	codeArrayAppendValue
-	codeArrayAppendSlice // Index-variant?
+	codeArrayAppendSlice
 
 	codeStringAppendString
 	codeStringAppendSlice
 )
 
-// Reads a single operation.
 func ReadFrom(r Reader) (Op, error) {
 	code, err := r.ReadUint8()
 	if err != nil {
 		return nil, err
 	}
 
+	var op Op
 	switch code {
-	case codeEnterValue:
-		val, err := r.ReadValue()
-		if err != nil {
-			return nil, err
-		}
-		return OpEnterValue{val}, nil
-	case codeEnterRootNop:
-		return OpEnterRoot{EnterNop}, nil
-	case codeEnterRootCopy:
-		return OpEnterRoot{EnterCopy}, nil
-	case codeEnterRootBlank:
-		return OpEnterRoot{EnterBlank}, nil
-	case codeEnterFieldNop:
-		idx, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		return OpEnterField{EnterNop, idx}, nil
-	case codeEnterFieldCopy:
-		idx, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		return OpEnterField{EnterCopy, idx}, nil
-	case codeEnterFieldBlank:
-		idx, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		return OpEnterField{EnterBlank, idx}, nil
-	case codeEnterElementNop:
-		idx, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		return OpEnterElement{EnterNop, idx}, nil
-	case codeEnterElementCopy:
-		idx, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		return OpEnterElement{EnterCopy, idx}, nil
-	case codeEnterElementBlank:
-		idx, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		return OpEnterElement{EnterBlank, idx}, nil
+	case codeValue:
+		op = &OpValue{}
+	case codeCopy:
+		op = &OpCopy{}
+	case codeBlank:
+		op = &OpBlank{}
 	case codeReturnIntoArray:
-		return OpReturnIntoArray{}, nil
+		op = &OpReturnIntoArray{}
 	case codeReturnIntoObject:
-		key, err := r.ReadString()
-		if err != nil {
-			return nil, err
-		}
-		return OpReturnIntoObject{key}, nil
+		op = &OpReturnIntoObject{}
 	case codeReturnIntoObjectKeyless:
-		return OpReturnIntoObjectKeyless{}, nil
+		op = &OpReturnIntoObjectKeyless{}
+	case codePushField:
+		op = &OpPushField{}
+	case codePushElement:
+		op = &OpPushElement{}
+	case codePushParent:
+		op = &OpPushParent{}
+	case codePop:
+		op = &OpPop{}
+	case codePushFieldCopy:
+		op = &OpPushFieldCopy{}
+	case codePushFieldBlank:
+		op = &OpPushFieldBlank{}
+	case codePushElementCopy:
+		op = &OpPushElementCopy{}
+	case codePushElementBlank:
+		op = &OpPushElementBlank{}
+	case codeReturnIntoObjectPop:
+		op = &OpReturnIntoObjectPop{}
+	case codeReturnIntoObjectKeylessPop:
+		op = &OpReturnIntoObjectKeylessPop{}
+	case codeReturnIntoArrayPop:
+		op = &OpReturnIntoArrayPop{}
 	case codeObjectSetFieldValue:
-		key, err := r.ReadString()
-		if err != nil {
-			return nil, err
-		}
-		value, err := r.ReadValue()
-		if err != nil {
-			return nil, err
-		}
-		return  OpObjectSetFieldValue{key, value}, nil
+		op = &OpObjectSetFieldValue{}
 	case codeObjectCopyField:
-		idx, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		return  OpObjectCopyField{idx}, nil
+		op = &OpObjectCopyField{}
 	case codeObjectDeleteField:
-		idx, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		return  OpObjectDeleteField{idx}, nil
+		op = &OpObjectDeleteField{}
 	case codeArrayAppendValue:
-		value, err := r.ReadValue()
-		if err != nil {
-			return nil, err
-		}
-		return  OpArrayAppendValue{value}, nil
+		op = &OpArrayAppendValue{}
 	case codeArrayAppendSlice:
-		left, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		right, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		return  OpArrayAppendSlice{left, right}, nil
+		op = &OpArrayAppendSlice{}
 	case codeStringAppendString:
-		str, err := r.ReadString()
-		if err != nil {
-			return nil, err
-		}
-		return  OpStringAppendString{str}, nil
+		op = &OpStringAppendString{}
 	case codeStringAppendSlice:
-		left, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		right, err := r.ReadUint()
-		if err != nil {
-			return nil, err
-		}
-		return  OpStringAppendSlice{left, right}, nil
-	default:
-		return nil, fmt.Errorf("unknown code: %d", code)
+		op = &OpStringAppendSlice{}
 	}
+
+	err = op.readParams(r)
+	if err != nil {
+		return nil, err
+	}
+	return op, nil
 }
 
-// Writes a single operation to a writer.
+// Writes a single operation
 func WriteTo(w Writer, op Op) error {
-	switch op := op.(type) {
-	case OpEnterValue:
-		err := w.WriteUint8(codeEnterValue)
-		if err != nil {
-			return err
-		}
-		return w.WriteValue(op.Value)
-	case OpEnterRoot:
-		switch op.Enter {
-		case EnterNop:
-			return w.WriteUint8(codeEnterRootNop)
-		case EnterCopy:
-			return w.WriteUint8(codeEnterRootCopy)
-		case EnterBlank:
-			return w.WriteUint8(codeEnterRootBlank)
-		default:
-			panic("invalid enter type")
-		}
-	case OpEnterField:
-		switch op.Enter {
-		case EnterNop:
-			err := w.WriteUint8(codeEnterFieldNop)
-			if err != nil {
-				return err
-			}
-		case EnterCopy:
-			err := w.WriteUint8(codeEnterFieldCopy)
-			if err != nil {
-				return err
-			}
-		case EnterBlank:
-			err := w.WriteUint8(codeEnterFieldBlank)
-			if err != nil {
-				return err
-			}
-		default:
-			panic("invalid enter type")
-		}
+	var code uint8
 
-		return w.WriteUint(op.Index)
-	case OpEnterElement:
-		switch op.Enter {
-		case EnterNop:
-			err := w.WriteUint8(codeEnterElementNop)
-			if err != nil {
-				return err
-			}
-		case EnterCopy:
-			err := w.WriteUint8(codeEnterElementCopy)
-			if err != nil {
-				return err
-			}
-		case EnterBlank:
-			err := w.WriteUint8(codeEnterElementBlank)
-			if err != nil {
-				return err
-			}
-		default:
-			panic("invalid enter type")
-		}
-
-		return w.WriteUint(op.Index)
-	case OpReturnIntoArray:
-		return w.WriteUint8(codeReturnIntoArray)
-	case OpReturnIntoObject:
-		err := w.WriteUint8(codeReturnIntoObject)
-		if err != nil {
-			return err
-		}
-		return w.WriteString(op.Key)
-	case OpReturnIntoObjectKeyless:
-		return w.WriteUint8(codeReturnIntoObjectKeyless)
-	case OpObjectSetFieldValue:
-		err := w.WriteUint8(codeObjectSetFieldValue)
-		if err != nil {
-			return err
-		}
-		err = w.WriteString(op.Key)
-		if err != nil {
-			return err
-		}
-		return w.WriteValue(op.Value)
-	case OpObjectCopyField:
-		err := w.WriteUint8(codeObjectCopyField)
-		if err != nil {
-			return err
-		}
-		return w.WriteUint(op.Index)
-	case OpObjectDeleteField:
-		err := w.WriteUint8(codeObjectDeleteField)
-		if err != nil {
-			return err
-		}
-		return w.WriteUint(op.Index)
-	case OpArrayAppendSlice:
-		err := w.WriteUint8(codeArrayAppendSlice)
-		if err != nil {
-			return err
-		}
-		err = w.WriteUint(op.Left)
-		if err != nil {
-			return err
-		}
-		return w.WriteUint(op.Right)
-	case OpArrayAppendValue:
-		err := w.WriteUint8(codeArrayAppendValue)
-		if err != nil {
-			return err
-		}
-		return w.WriteValue(op.Value)
-	case OpStringAppendSlice:
-		err := w.WriteUint8(codeStringAppendSlice)
-		if err != nil {
-			return err
-		}
-		err = w.WriteUint(op.Left)
-		if err != nil {
-			return err
-		}
-		return w.WriteUint(op.Right)
-	case OpStringAppendString:
-		err := w.WriteUint8(codeStringAppendString)
-		if err != nil {
-			return err
-		}
-		return w.WriteValue(op.String)
+	switch op.(type) {
+	case *OpValue:
+		code = codeValue
+	case *OpCopy:
+		code = codeCopy
+	case *OpBlank:
+		code = codeBlank
+	case *OpReturnIntoArray:
+		code = codeReturnIntoArray
+	case *OpReturnIntoObject:
+		code = codeReturnIntoObject
+	case *OpReturnIntoObjectKeyless:
+		code = codeReturnIntoObjectKeyless
+	case *OpPushField:
+		code = codePushField
+	case *OpPushElement:
+		code = codePushElement
+	case *OpPushParent:
+		code = codePushParent
+	case *OpPop:
+		code = codePop
+	case *OpPushFieldCopy:
+		code = codePushFieldCopy
+	case *OpPushFieldBlank:
+		code = codePushFieldBlank
+	case *OpPushElementCopy:
+		code = codePushElementCopy
+	case *OpPushElementBlank:
+		code = codePushElementBlank
+	case *OpReturnIntoObjectPop:
+		code = codeReturnIntoObjectPop
+	case *OpReturnIntoObjectKeylessPop:
+		code = codeReturnIntoObjectKeylessPop
+	case *OpReturnIntoArrayPop:
+		code = codeReturnIntoArrayPop
+	case *OpObjectSetFieldValue:
+		code = codeObjectSetFieldValue
+	case *OpObjectCopyField:
+		code = codeObjectCopyField
+	case *OpObjectDeleteField:
+		code = codeObjectDeleteField
+	case *OpArrayAppendValue:
+		code = codeArrayAppendValue
+	case *OpArrayAppendSlice:
+		code = codeArrayAppendSlice
+	case *OpStringAppendString:
+		code = codeStringAppendString
+	case *OpStringAppendSlice:
+		code = codeStringAppendSlice
 	}
 
 
-	panic("unknown op")
+	err := w.WriteUint8(code)
+	if err != nil {
+		return err
+	}
+
+	err = op.writeParams(w)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Writes a patch to a writer.
@@ -319,4 +196,266 @@ func (patch Patch) WriteTo(w Writer) error {
 	}
 
 	return nil
+}
+
+// Implementations:
+
+func (op *OpValue) readParams(r Reader) (err error) {
+	op.Value, err = r.ReadValue()
+	return
+}
+
+func (op *OpValue) writeParams(w Writer) (err error) {
+	err = w.WriteValue(op.Value)
+	return
+}
+
+func (op *OpCopy) readParams(r Reader) (err error) {
+	return
+}
+
+func (op *OpCopy) writeParams(w Writer) (err error) {
+	return
+}
+
+func (op *OpBlank) readParams(r Reader) (err error) {
+	return
+}
+
+func (op *OpBlank) writeParams(w Writer) (err error) {
+	return
+}
+
+func (op *OpReturnIntoObject) readParams(r Reader) (err error) {
+	op.Key, err = r.ReadString()
+	return
+}
+
+func (op *OpReturnIntoObject) writeParams(w Writer) (err error) {
+	err = w.WriteString(op.Key)
+	return
+}
+
+func (op *OpReturnIntoObjectKeyless) readParams(r Reader) (err error) {
+	return
+}
+
+func (op *OpReturnIntoObjectKeyless) writeParams(w Writer) (err error) {
+	return
+}
+
+func (op *OpReturnIntoArray) readParams(r Reader) (err error) {
+	return
+}
+
+func (op *OpReturnIntoArray) writeParams(w Writer) (err error) {
+	return
+}
+
+func (op *OpPushField) readParams(r Reader) (err error) {
+	op.Index, err = r.ReadUint()
+	return
+}
+
+func (op *OpPushField) writeParams(w Writer) (err error) {
+	err = w.WriteUint(op.Index)
+	return
+}
+
+func (op *OpPushElement) readParams(r Reader) (err error) {
+	op.Index, err = r.ReadUint()
+	return
+}
+
+func (op *OpPushElement) writeParams(w Writer) (err error) {
+	err = w.WriteUint(op.Index)
+	return
+}
+
+func (op *OpPushParent) readParams(r Reader) (err error) {
+	op.N, err = r.ReadUint()
+	return
+}
+
+func (op *OpPushParent) writeParams(w Writer) (err error) {
+	err = w.WriteUint(op.N)
+	return
+}
+
+func (op *OpPop) readParams(r Reader) (err error) {
+	return
+}
+
+func (op *OpPop) writeParams(w Writer) (err error) {
+	return
+}
+
+// Note: all of these helpers don't invoke OpCopy/Blank/Pop because we now they're empty.
+
+func (op *OpPushFieldCopy) readParams(r Reader) (err error) {
+	err = op.OpPushField.readParams(r)
+	return
+}
+
+func (op *OpPushFieldCopy) writeParams(w Writer) (err error) {
+	err = op.OpPushField.writeParams(w)
+	return
+}
+
+func (op *OpPushFieldBlank) readParams(r Reader) (err error) {
+	err = op.OpPushField.readParams(r)
+	return
+}
+
+func (op *OpPushFieldBlank) writeParams(w Writer) (err error) {
+	err = op.OpPushField.writeParams(w)
+	return
+}
+
+func (op *OpPushElementCopy) readParams(r Reader) (err error) {
+	err = op.OpPushElement.readParams(r)
+	return
+}
+
+func (op *OpPushElementCopy) writeParams(w Writer) (err error) {
+	err = op.OpPushElement.writeParams(w)
+	return
+}
+
+func (op *OpPushElementBlank) readParams(r Reader) (err error) {
+	err = op.OpPushElement.readParams(r)
+	return
+}
+
+func (op *OpPushElementBlank) writeParams(w Writer) (err error) {
+	err = op.OpPushElement.writeParams(w)
+	return
+}
+
+func (op *OpReturnIntoObjectPop) readParams(r Reader) (err error) {
+	err = op.OpReturnIntoObject.readParams(r)
+	return
+}
+
+func (op *OpReturnIntoObjectPop) writeParams(w Writer) (err error) {
+	err = op.OpReturnIntoObject.writeParams(w)
+	return
+}
+
+func (op *OpReturnIntoObjectKeylessPop) readParams(r Reader) (err error) {
+	return
+}
+
+func (op *OpReturnIntoObjectKeylessPop) writeParams(w Writer) (err error) {
+	return
+}
+
+func (op *OpReturnIntoArrayPop) readParams(r Reader) (err error) {
+	err = op.OpReturnIntoArray.readParams(r)
+	return
+}
+
+func (op *OpReturnIntoArrayPop) writeParams(w Writer) (err error) {
+	err = op.OpReturnIntoArray.writeParams(w)
+	return
+}
+
+func (op *OpObjectSetFieldValue) readParams(r Reader) (err error) {
+	err = op.OpValue.readParams(r)
+	if err != nil {
+		return
+	}
+	err = op.OpReturnIntoObject.readParams(r)
+	return
+}
+
+func (op *OpObjectSetFieldValue) writeParams(w Writer) (err error) {
+	err = op.OpValue.writeParams(w)
+	if err != nil {
+		return
+	}
+	err = op.OpReturnIntoObject.writeParams(w)
+	return
+}
+
+func (op *OpObjectCopyField) readParams(r Reader) (err error) {
+	err = op.OpPushField.readParams(r)
+	if err != nil {
+		return
+	}
+	return
+}
+
+func (op *OpObjectCopyField) writeParams(w Writer) (err error) {
+	err = op.OpPushField.writeParams(w)
+	if err != nil {
+		return
+	}
+	return
+}
+
+func (op *OpObjectDeleteField) readParams(r Reader) (err error) {
+	op.Index, err = r.ReadUint()
+	return
+}
+
+func (op *OpObjectDeleteField) writeParams(w Writer) (err error) {
+	err = w.WriteUint(op.Index)
+	return
+}
+
+func (op *OpArrayAppendValue) readParams(r Reader) (err error) {
+	op.Value, err = r.ReadValue()
+	return
+}
+
+func (op *OpArrayAppendValue) writeParams(w Writer) (err error) {
+	err = w.WriteValue(op.Value)
+	return
+}
+
+func (op *OpArrayAppendSlice) readParams(r Reader) (err error) {
+	op.Left, err = r.ReadUint()
+	if err != nil {
+		return
+	}
+	op.Right, err = r.ReadUint()
+	return
+}
+
+func (op *OpArrayAppendSlice) writeParams(w Writer) (err error) {
+	err = w.WriteUint(op.Left)
+	if err != nil {
+		return
+	}
+	err = w.WriteUint(op.Right)
+	return
+}
+
+func (op *OpStringAppendString) readParams(r Reader) (err error) {
+	op.String, err = r.ReadString()
+	return
+}
+
+func (op *OpStringAppendString) writeParams(w Writer) (err error) {
+	err = w.WriteString(op.String)
+	return
+}
+
+func (op *OpStringAppendSlice) readParams(r Reader) (err error) {
+	op.Left, err = r.ReadUint()
+	if err != nil {
+		return
+	}
+	op.Right, err = r.ReadUint()
+	return
+}
+
+func (op *OpStringAppendSlice) writeParams(w Writer) (err error) {
+	err = w.WriteUint(op.Left)
+	if err != nil {
+		return
+	}
+	err = w.WriteUint(op.Right)
+	return
 }

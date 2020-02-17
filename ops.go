@@ -1,40 +1,27 @@
 package mendoza
 
-type EnterType uint8
-
-const (
-	EnterNop EnterType = iota
-	EnterCopy
-	EnterBlank
-)
-
 //go-sumtype:decl Op
 
 type Op interface {
-	isOp()
+	applyTo(p *patcher)
+	readParams(r Reader) error
+	writeParams(w Writer) error
 }
 
 // A patch is a list of operations.
 type Patch []Op
 
-// Stack operators
 
-type OpEnterField struct {
-	Enter EnterType
-	Index int
-}
+// Output stack operators
 
-type OpEnterElement struct {
-	Enter EnterType
-	Index int
-}
-
-type OpEnterRoot struct {
-	Enter EnterType
-}
-
-type OpEnterValue struct {
+type OpValue struct {
 	Value interface{}
+}
+
+type OpCopy struct {
+}
+
+type OpBlank struct {
 }
 
 type OpReturnIntoObject struct {
@@ -47,17 +34,76 @@ type OpReturnIntoObjectKeyless struct {
 type OpReturnIntoArray struct {
 }
 
-// Object helpers
 
-type OpObjectSetFieldValue struct {
-	Key   string
-	Value interface{}
-}
+// Input stack operators
 
-type OpObjectCopyField struct {
+type OpPushField struct {
 	Index int
 }
 
+type OpPushElement struct {
+	Index int
+}
+
+type OpPushParent struct {
+	N int
+}
+
+type OpPop struct {
+}
+
+// Combined input and output
+
+type OpPushFieldCopy struct {
+	OpPushField
+	OpCopy
+}
+
+type OpPushFieldBlank struct {
+	OpPushField
+	OpBlank
+}
+
+type OpPushElementCopy struct {
+	OpPushElement
+	OpCopy
+}
+
+type OpPushElementBlank struct {
+	OpPushElement
+	OpBlank
+}
+
+type OpReturnIntoObjectPop struct {
+	OpReturnIntoObject
+	OpPop
+}
+
+type OpReturnIntoObjectKeylessPop struct {
+	OpReturnIntoObjectKeyless
+	OpPop
+}
+
+type OpReturnIntoArrayPop struct {
+	OpReturnIntoArray
+	OpPop
+}
+
+// Object helpers
+
+type OpObjectSetFieldValue struct {
+	OpValue
+	OpReturnIntoObject
+}
+
+type OpObjectCopyField struct {
+	OpPushField
+	OpCopy
+	OpReturnIntoObjectKeyless
+	OpPop
+}
+
+//
 type OpObjectDeleteField struct {
 	Index int
 }
@@ -83,19 +129,3 @@ type OpStringAppendSlice struct {
 	Left  int
 	Right int
 }
-
-// isOp() implementations:
-func (OpEnterRoot) isOp()               {}
-func (OpEnterValue) isOp()              {}
-func (OpEnterField) isOp()              {}
-func (OpEnterElement) isOp()            {}
-func (OpReturnIntoArray) isOp()         {}
-func (OpReturnIntoObject) isOp()        {}
-func (OpReturnIntoObjectKeyless) isOp() {}
-func (OpObjectSetFieldValue) isOp()     {}
-func (OpObjectCopyField) isOp()         {}
-func (OpObjectDeleteField) isOp()       {}
-func (OpArrayAppendValue) isOp()        {}
-func (OpArrayAppendSlice) isOp()        {}
-func (OpStringAppendString) isOp()      {}
-func (OpStringAppendSlice) isOp()       {}

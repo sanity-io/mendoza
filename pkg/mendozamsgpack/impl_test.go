@@ -9,8 +9,8 @@ import (
 
 func TestEncodingSize(t *testing.T) {
 	patch := mendoza.Patch{
-		mendoza.OpEnterRoot{mendoza.EnterBlank},
-		mendoza.OpArrayAppendSlice{0, 6},
+		&mendoza.OpBlank{},
+		&mendoza.OpArrayAppendSlice{0, 6},
 	}
 
 	b, err := mendozamsgpack.Marshal(patch)
@@ -19,13 +19,13 @@ func TestEncodingSize(t *testing.T) {
 }
 
 func TestRoundtrip(t *testing.T) {
-	// This patch isn't valid
+	// This patch isn't valid, we're only testing that it roundtrips properly
 	patch := mendoza.Patch{
-		mendoza.OpEnterRoot{mendoza.EnterBlank},
-		mendoza.OpEnterField{mendoza.EnterCopy, 10},
-		mendoza.OpEnterElement{mendoza.EnterNop, 1000000},
-		mendoza.OpEnterValue{"abc"},
-		mendoza.OpArrayAppendSlice{0, 6},
+		&mendoza.OpBlank{},
+		&mendoza.OpPushFieldCopy{OpPushField: mendoza.OpPushField{10}},
+		&mendoza.OpPushElement{1000000},
+		&mendoza.OpValue{"abc"},
+		&mendoza.OpArrayAppendSlice{0, 6},
 	}
 
 	b, err := mendozamsgpack.Marshal(patch)
@@ -35,6 +35,28 @@ func TestRoundtrip(t *testing.T) {
 	require.NoError(t, err)
 
 	require.EqualValues(t, patch, decodedPatch)
+}
+
+func TestSize(t *testing.T) {
+	left := map[string]interface{}{
+		"_type": "Person",
+		"name": "Bob",
+		"age": 10.0,
+	}
+	right := map[string]interface{}{
+		"_type": "Person",
+		"name": "Bob",
+		"age": 15.0,
+	}
+
+	patch, err := mendoza.CreatePatch(left, right)
+	require.NoError(t, err)
+
+	b, err := mendozamsgpack.Marshal(patch)
+	require.NoError(t, err)
+
+	// TODO: We should probably be able to reduce this even further.
+	require.True(t, len(b) < 20)
 }
 
 func TestEmptyPatch(t *testing.T) {

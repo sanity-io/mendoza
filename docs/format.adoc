@@ -1,188 +1,412 @@
 # Mendoza patch format
 :toc:
+:example-caption:
 
-A Mendoza patch consists of a list of _operations_ which are executed, very much like a virtual machine.
+## Introduction
+
+A Mendoza patch is quite different from a patch produced by tools like `diff`, and to understand Mendoza it helps to understand why `diff` produces patches in the way it does.
+A patch produced by `diff`
+
+- … is made for a human to read and understand. Therefore it's based on simple operations (keep text, insert text, delete text).
+- … can be applied even if the source has been changed a bit. This is accomplished by including parts of the context around every part.
+- … is designed for text, not structured documents.
+
+Mendoza on the other hand (as mentioned in the README) is designed to be consumed by computers which works on exact versions of documents.
+As such, Mendoza has more parallels to compression algorithms than to diffing algorithms:
+Compression algorithms are all about _being able to reconstruct the target_ and less about _describing changes_.
+You can look at a Mendoza patch as a program which executes with the left-side as input and produces the right-side as output,
+and a Mendoza decoder is a virtual machine which runs this program.
+
+## Patch format
+
+Conceptually, a Mendoza patch is a list of operations:
+
+```typescript
+type Patch = Operation[]
+
+type Param = string | uint | JSON
+```
+
+Every operation is identified by an _opcode_ (an 8-bit number) and has a fixed number of parameters.
+Parameters are either strings, positive numbers, or JSON values.
+Some sequences of operations are very common (e.g. a `PushField` followed by `Copy`) and therefore Mendoza also includes _composite_ operations (e.g. `PushFieldCopy`).
+Composite operations are merely shortcuts for multiple primitive operations to make the patches a bit smaller.
+
+## JSON representation
+
+A JSON representation of a Mendoza patch is a single flat array.
+Each operation is encoded with its opcode followed by its parameters.
+
+.A Mendoza patch in JSON representation
+```javascript
+[
+  18,      // DeleteField
+  0,       //   … at index 0
+  10,      // PushFieldCopy
+  0,       //   … at index 0
+  14,      // ReturnIntoObjectPop
+  "name"   //   … with "name"
+]
+```
 
 ## Execution model
 
 Applying a patch involves executing the operations while maintaining the following state:
 
-- The left document.
-- An _input stack_, used for traversing the left document.
-- An _output stack_, used for producing the right document. Every entry of the output stack also stores the _key_ where it came from.
+.State used in a Mendoza decoder
+====
+- An _input stack_, used for traversing the left document. Every entry of the input stack also stores the _key_ of where it came from.
+- An _output stack_, used for producing the right document.
+====
 
-We also define the following terms:
+.Decoding of a Mendoza patch
+====
+- Place the left document on the input and output stack.
+- Execute each operation.
+- The top value on the output stack is now the result (i.e. the right document).
+====
 
-- The _input value_ is the value at the top of the input stack.
-- The _output value_ is the value at the top of the output stack.
+Note that this means an empty patch (i.e. no operations) will produce a right document which is equivalent to the left document.
 
 ## Examples / tutorial
 
 Here are some examples which also serves as a mini tutorial.
 
-### Starting from scratch vs. starting with copy
+### Step-by-step example
+
+Let's look at the following Mendoza patch
+
+- `ObjectDeleteField("name")`
+- `ObjectSetFieldValue("age", 30)`
+- `PushFieldCopy("name")`
+- `ReturnIntoObjectPop("fullName")`
+
+applied on the following document
+
+```json
+{
+  "name": "Michael Bluth",
+  "age": 20,
+}
+```
+
+.Initial state
+- Input stack: [_root_]
+- Output stack: [_root_]
+
+.After applying `ObjectDeleteField("name")`
+- Input stack: [_root_]
+- Output stack: [`{"age": 20}`]
+
+.After applying `ObjectSetFieldValue("age", 30)`
+- Input stack: [_root_]
+- Output stack: [`{"age": 30}`]
+
+.After applying `PushFieldCopy("name")`
+- Input stack: [_root_, `"Michael Bluth"`]
+- Output stack: [`{"age": 30}`, `"Michael Bluth"`]
+
+.After applying `ReturnIntoObjectPop("fullName")`
+- Input stack: [_root_]
+- Output stack: [`{"age": 30, "fullName" "Michael Bluth"}`]
+
+### Starting from scratch
 
 Sometimes it's better to start with a blank object and copy over the fields you need:
 
-- `Enter(Root, Object)`
-- `CopyField("name")`
-- `SetFieldValue("age", 30)`
+- `Blank()`
+- `ObjectCopyField("name")`
+- `ObjectSetFieldValue("age", 30)`
 
-… while other times it's better to start with a copy and delete the fields you don't need:
 
-- `Enter(Root, Copy)`
-- `DeleteField("skills")`
-- `SetFieldValue("age", 30)`
+### Pushing fields
 
-### Entering fields
+The `PushField` operation is used for entering fields in objects.
 
-The `Enter` operation is usd for entering fields in objects:
+The following example will modify the zip code in a nested object:
 
-- `Enter(Root, Copy)`
-- `Enter(Field("user"), Copy)`
-- `Enter(Field("address"), Copy)`
+- `PushFieldCopy("user")`
+- `PushFieldCopy("address")`
 - `SetFieldValue("zip", 1234)`
-- `Return()`
-- `Return()`
+- `ReturnIntoObjectKeylessPop()`
+- `ReturnIntoObjectKeylessPop()`
 
-Note that entering a field remembers the key where it come from, which `Return()` then uses to set it.
-
-### Renaming a field
-
-Renaming a field is done by entering and then returning with a different key:
-
-- `Enter(Root, Copy)`
-- `Enter(Field("user"), Copy)`
-- `Return("userDetails")`
+Note that entering a field remembers the key where it come from, which `ReturnIntoObjectKeyless()` then uses to set it.
 
 ### Dealing with arrays
 
-Arrays are typically dealt with by entering with a blank array and then using `AppendSlice` and `AppendValue`:
+Arrays are typically dealt with by pushing with a blank value and then using `ArrayAppendValue` and `ArrayAppendValue`.
+`ArrayAppendSlice` refers to indices in the old array (e.g. the input value).
 
-- `Enter(Root, Copy)`
-- `Enter(Field("skills"), Array)`
-- `AppendSlice(0, 2)`
-- `AppendValue("Go")`
-- `Return()`
+- `PushFieldBlank("skills")`
+- `ArrayAppendSlice(0, 2)`
+- `ArrayAppendValue("Go")`
+- `ReturnIntoObjectKeylessPop()`
 
+## List of primitive operations
 
-### Complete patch
+In this section we'll use these additional terms:
 
-The following patch:
+- The _input value_ is the value at the top of the input stack.
+- The _output value_ is the value at the top of the output stack.
 
-- `Enter(Root, Copy)`
-- `DeleteField("name")`
-- `Enter(Field("name"), Copy)`
-- `Return("fullName")`
-- `Enter(Field("skills"), Array)`
-- `AppendSlice(0, 2)`
-- `AppendValue("Go")`
-- `Return()`
+[[OpValue]]
+### `Value` operation
 
-Has the following semantics:
+.Parameters
+- `value`: `JSON`
 
-0. Push the left document onto the input stack, and a copy of it onto the output stack.
-0. Delete the field `"name"` in the output value.
-0. Copy the field `"name"` in the input value into onto the input and output stack.
-0. Take the value of the field `"skills"`, push it onto the input stack and push an empty array onto the output stack.
-0. Append the slice `[0:2]` from the input value to the output value.
-0. Append the literal value `"Go"` to the output value.
-0. Pop from both stacks and store the result at `"skills"`.
+The `Value` operation pushes a new value onto the output stack.
 
-## List of operations
+[[OpCopy]]
+### `Copy` operation
 
-### `Enter` operation
+.Parameters
+_None_
 
-.Params
-- `source`: One of `Index(int)`, `Field(string)`, `Root`
-- `output`: One of `Copy`, `Array`, `Object`, `Nop`
+The `Copy` operation pushes the input value onto the output stack.
 
-The `Enter` operation is used for accessing and modifying nested objects.
-It executes in two steps:
+[[OpBlank]]
+### `Blank` operation
 
-.Step 1: Finding the new input value
-- If `source` is `Index(int)`, it finds the new input value by looking up the element in the current input value array.
-- If `source` is `Field(string)` it finds the new input value by looking up the field in the current input value object.
-- If `source` is `Root`, then the new input value is the left document.
+.Parameters
+_None_
 
-.Step 2: Finding the new output value
-- If `output` is `Copy`, then the new output value is a copy of the new input value.
-- If `output` is `Array`, then the new output value is an empty array.
-- If `output` is `Object`, then the new output value is an empty object.
-- If `output` is `Nop`, then there is no new output value.
+The `Blank` operation pushes an empty value onto the output stack.
+This empty value will be treated as either a string, array, or object depending on the next operations.
 
-After the new input/output value has been determined, it pushes them onto the stacks:
-- The new input value is pushed onto the input stack.
-- If there was a new output value, it's pushed onto the output stack together with information about the `source`.
-  See the `Return` operation for how this is used.
+[[OpReturnIntoArray]]
+### `ReturnIntoArray` operation
 
-### `Return` operation
+.Parameters
+_None_
 
-.Params
-- `key`: Optional `string`
+The `ReturnIntoArray` operation takes the current output value, pops the output stack, and then pushes it onto the new output value (i.e. the value before it in the stack).
+The new output value must be an array.
 
-The `Return` operation pops from both the input/output stack and stores the result in the new output value object.
-More concretely:
+[[OpReturnIntoObject]]
+### `ReturnIntoObject` operation
 
-- The input stack is popped.
-- If the `key` is not present, then it's set to the field from the source stored in the top of the output stack.
-- Let `fieldValue` be a copy of the current output value.
-- The output stack is popped (thus the next value on the stack is now the output value).
-- The field `key` in the output value object is set to `fieldValue`.
-
-### `OutputValue` operation
-
-.Params
-- `value`
-
-Pushes the value onto the output value stack.
-This operation only makes sense as the first operation in a patch (when you want to represent).
-
-### `SetFieldValue` operation
-
-.Params
-- `key`: `string`
-- `value`
-
-Sets the field `key` in the output value object to `value`.
-
-### `CopyField` operation
-
-.Params
+.Parameters
 - `key`: `string`
 
-Copies the field named `key` from the input value object into the output value object.
+The `OpReturnIntoObject` operation takes the current output value, pops the output stack, and then stores it on the new output value (i.e. the value before it in the stack) with the given key.
+The new output value must be an object.
 
-[NOTE]
-====
-This is equivalent to:
 
-- `Enter(Field(key))`
-- `Return()`
-====
+[[OpReturnIntoObjectKeyless]]
+### `ReturnIntoObjectKeyless` operation
 
-### `DeleteField` operation
+.Parameters
+_None_
 
-.Params
+The `OpReturnIntoObjectKeyless` operation first finds the key that was used to push the current input value (see <<OpPushField,PushField>>),
+then it takes the current output value, pops the output stack, and stores it on the new output value (i.e. the value before it in the stack) with the given key.
+The new output value must be an object.
+
+[[OpPushField]]
+### `PushField` operation
+
+.Parameters
+- `keyIdx`: `uint`
+
+The `PushField` operation looks up a field in the input value (which must an object), and then pushes the value onto the input stack.
+`keyIdx` refers to the _nth_ key (after you sort them lexically) in the object.
+The key is stored together with the value in the input stack so that <<OpReturnIntoObjectKeyless,ReturnIntoObjectKeyless>> can access it later.
+
+[[OpPushElement]]
+### `PushElement` operation
+
+.Parameters
+_None_
+
+The `PushElement` operation looks up an element in the input value (which must an array), and then pushes the value onto the input stack.
+
+[[OpPushParent]]
+### `PushParent` operation
+
+.Parameters
+- `pos`: `uint`
+
+The `PushParent` operation looks up a value earlier in the input stack and pushes it onto the input stack.
+`pos=0` pushes the parent, `pos=1` pushes the grand parent, and so forth.
+There's no way of duplicating the current input value.
+
+[[OpPop]]
+### `Pop` operation
+
+.Parameters
+_None_
+
+The `Pop` operation pops the input stack.
+
+[[OpObjectDeleteField]]
+### `ObjectDeleteField` operation
+
+.Parameters
 - `key`: `string`
 
-Deletes the field named `key` in the output value object.
+The `ObjectDeleteField` operation deletes a field in the output value (which must be an object).
 
-### `AppendValue` operation
+[[OpArrayAppendValue]]
+### `ArrayAppendValue` operation
 
-.Params
-- `value`
+.Parameters
+- `key`: `JSON`
 
-Appends the `value` to the output value array.
+The `ArrayAppendValue` operation appends a JSON value to the output value (which must be an array).
 
-### `AppendSlice` operation
+[[OpArrayAppendSlice]]
+### `ArrayAppendSlice` operation
 
-.Params
-- `left`: `int`
-- `right`: `int`
+.Parameters
+- `left`: `uint`
+- `right`: `uint`
 
-Takes the values stored between the indices `left` and `right` (exclusive) in the input value array and appends them to the output value array.
+The `ArrayAppendSlice` operation slices the input value (which must be an array) and appends it to the output value (which must also be an array).
+The `left` index is inclusive and the `right` index is exclusive (i.e. `left=3, right=5` slices two values).
 
-## JSON representation
+[[OpStringAppendString]]
+### `StringAppendString` operation
 
-TODO.
+.Parameters
+- `value`: `string`
+
+The `StringAppendString` operation appends a string value to the output value (which must be a string).
+
+[[OpStringAppendSlice]]
+### `StringAppendSlice` operation
+
+.Parameters
+- `left`: `uint`
+- `right`: `uint`
+
+The `StringAppendSlice` operation slices the input value (which must be a string) and appends it to the output value (which must also be a string).
+The `left` index is inclusive and the `right` index is exclusive (i.e. `left=3, right=5` slices two values).
+The indices refers to _byte offsets_ in UTF-8 encoding.
+
+## Overview over operations with opcodes
+
+|===
+|Opcode (8-bit) |Name |Type |Description
+
+|0
+|<<OpValue,Value>>
+|Output
+|
+
+|1
+|<<OpCopy,Copy>>
+|Output
+|
+
+|2
+|<<OpBlank,Blank>>
+|Output
+|
+
+|3
+|<<OpReturnIntoArray,ReturnIntoArray>>
+|Output
+|
+
+|4
+|<<OpReturnIntoObject,ReturnIntoObject>>
+|Output
+|
+
+|5
+|<<OpReturnIntoObjectKeyless,ReturnIntoObjectKeyless>>
+|Output
+|
+
+|6
+|<<OpPushField,PushField>>
+|Input
+|
+
+|7
+|<<OpPushElement,PushElement>>
+|Input
+|
+
+|8
+|<<OpPushParent,PushParent>>
+|Input
+|
+
+|9
+|<<OpPop,Pop>>
+|Input
+|
+
+|10
+|PushFieldCopy
+|Composite
+|<<OpPushField,PushField>> + <<OpCopy,Copy>>
+
+|11
+|PushFieldBlank
+|Composite
+|<<OpPushField,PushField>> + <<OpBlank,Blank>>
+
+|12
+|PushElementCopy
+|Composite
+|<<OpPushElement,PushElement>> + <<OpCopy,Copy>>
+
+|13
+|PushFieldBlank
+|Composite
+|<<OpPushElement,PushElement>> + <<OpBlank,Blank>>
+
+|14
+|ReturnIntoObjectPop
+|Composite
+|<<OpReturnIntoObject,ReturnIntoObject>> + <<OpPop,Pop>>
+
+|15
+|ReturnIntoObjectKeylessPop
+|Composite
+|<<OpReturnIntoObjectKeyless,ReturnIntoObjectKeyless>> + <<OpPop,Pop>>
+
+|15
+|ReturnIntoArrayPop
+|Composite
+|<<OpReturnIntoArray,ReturnIntoArray>> + <<OpPop,Pop>>
+
+|16
+|ObjectSetFieldValue
+|Composite
+|<<OpValue,Value>> + <<OpReturnIntoObject,ReturnIntoObject>>
+
+|17
+|ObjectCopyField
+|Composite
+|<<OpPushField,PushField>> + <<OpCopy,Copy>> + <<OpReturnIntoObjectKeyless,ReturnIntoObjectKeyless>> + <<OpPop,Pop>>
+
+|18
+|<<OpObjectDeleteField,ObjectDeleteField>>
+|Output
+|
+
+|19
+|<<OpArrayAppendValue,ArrayAppendValue>>
+|Output
+|
+
+|20
+|<<OpArrayAppendSlice,ArrayAppendSlice>>
+|Output
+|
+
+|21
+|<<OpStringAppendString,StringAppendString>>
+|Output
+|
+
+|22
+|<<OpStringAppendSlice,StringAppendSlice>>
+|Output
+|
+|===

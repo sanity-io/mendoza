@@ -28,7 +28,10 @@ func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 // Creates a patch which can be applied to the left document to produce the right document.
 func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
 	if left == nil {
-		return Patch{OpEnterValue{right}}, nil
+		if right == nil {
+			return Patch{}, nil
+		}
+		return Patch{&OpValue{right}}, nil
 	}
 
 	leftList, err := mendoza.HashListFor(left, options.convertFunc)
@@ -52,12 +55,16 @@ func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
 // Creates two patches: The first can be applied to the left document to produce the right document,
 // the second can be applied to the right document to produce the left document.
 func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
+	if left == nil && right == nil {
+		return Patch{}, Patch{}, nil
+	}
+
 	if left == nil {
-		return Patch{OpEnterValue{right}}, Patch{OpEnterValue{nil}}, nil
+		return Patch{&OpValue{right}}, Patch{&OpValue{nil}}, nil
 	}
 
 	if right == nil {
-		return Patch{OpEnterValue{nil}}, Patch{OpEnterValue{left}}, nil
+		return Patch{&OpValue{nil}}, Patch{&OpValue{left}}, nil
 	}
 
 	leftList, err := mendoza.HashListFor(left, options.convertFunc)
@@ -74,7 +81,7 @@ func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch
 		left:      leftList,
 		right:     rightList,
 		hashIndex: leftHashIndex,
-		options:options,
+		options:   options,
 	}
 
 	rightHashIndex := mendoza.NewHashIndex(rightList)
@@ -82,7 +89,7 @@ func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch
 		left:      rightList,
 		right:     leftList,
 		hashIndex: rightHashIndex,
-		options:options,
+		options:   options,
 	}
 	return leftDiffer.build(), rightDiffer.build(), nil
 }
@@ -139,7 +146,7 @@ func (d *differ) build() Patch {
 	req := reqs[0]
 
 	if req.patch == nil {
-		return Patch{OpEnterValue{root.Value}}
+		return Patch{&OpValue{root.Value}}
 	}
 
 	return req.patch
@@ -184,20 +191,44 @@ func (d *differ) reconstruct(idx int, reqs []request) {
 	}
 }
 
-// Creates a patch which enters an entry in the left document.
-func (d *differ) enterPatch(enter EnterType, idx int) Op {
+func (d *differ) enterBlank(patch *Patch, idx int) {
 	if idx == 0 {
-		return OpEnterRoot{enter}
+		*patch = append(*patch, &OpBlank{})
+		return
 	}
 
 	entry := d.left.Entries[idx]
 	parentEntry := d.left.Entries[entry.Parent]
 
+	var op Op
+
 	if parentEntry.IsNonEmptyMap() {
-		return OpEnterField{enter, entry.Reference.Index}
+		op = &OpPushFieldBlank{OpPushField: OpPushField{entry.Reference.Index}}
+	} else {
+		op = &OpPushElementBlank{OpPushElement: OpPushElement{entry.Reference.Index}}
 	}
 
-	return OpEnterElement{enter, entry.Reference.Index}
+	*patch = append(*patch, op)
+}
+
+func (d *differ) enterCopy(patch *Patch, idx int) {
+	if idx == 0 {
+		// Root => Already on the stack.
+		return
+	}
+
+	entry := d.left.Entries[idx]
+	parentEntry := d.left.Entries[entry.Parent]
+
+	var op Op
+
+	if parentEntry.IsNonEmptyMap() {
+		op = &OpPushFieldCopy{OpPushField: OpPushField{entry.Reference.Index}}
+	} else {
+		op = &OpPushElementCopy{OpPushElement: OpPushElement{entry.Reference.Index}}
+	}
+
+	*patch = append(*patch, op)
 }
 
 /*
@@ -224,10 +255,10 @@ In this case the 2 recursive calls are as follows:
 
 // This stores information about each candidate map in the left-side document.
 type mapCandidate struct {
-	alias            map[string]mapAlias
-	seenKeys         map[string]struct{}
-	requestIdx       int
-	contextIdx       int
+	alias      map[string]mapAlias
+	seenKeys   map[string]struct{}
+	requestIdx int
+	contextIdx int
 }
 
 type mapAlias struct {
@@ -414,22 +445,27 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 		removeCount := len(removeKeys)
 		aliasCount := len(cand.alias)
 
-		enterMode := EnterBlank
+		isCopy := false
 
 		if removeCount < aliasCount {
 			// Note: This doesn't currently take into account that we have two types of aliasing.
 			// It's shorter to alias a field with the same key (one single copy field).
 			// For now let's assume that the difference here is pretty small either way.
-			enterMode = EnterCopy
+			isCopy = true
 		}
 
-		patch = append(patch, d.enterPatch(enterMode, primaryIdx))
+		if isCopy {
+			d.enterCopy(&patch, primaryIdx)
+		} else {
+			d.enterBlank(&patch, primaryIdx)
+		}
+
 		size += 2
 
-		if enterMode == EnterCopy {
+		if isCopy {
 			// Delete fields we don't need
 			for _, removeIdx := range removeKeys {
-				patch = append(patch, OpObjectDeleteField{removeIdx})
+				patch = append(patch, &OpObjectDeleteField{removeIdx})
 				size += 2
 			}
 		}
@@ -440,13 +476,16 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 
 			if alias, ok := cand.alias[fieldKey]; ok {
 				if alias.sameKey {
-					if enterMode == EnterBlank {
+					if !isCopy {
 						// We only need this if we're starting with a blank object
-						patch = append(patch, OpObjectCopyField{alias.fieldIdx})
+						patch = append(patch, &OpObjectCopyField{OpPushField: OpPushField{alias.fieldIdx}})
 						size += 2
 					}
 				} else {
-					patch = append(patch, OpEnterField{EnterCopy, alias.fieldIdx}, OpReturnIntoObject{fieldKey})
+					patch = append(patch,
+						&OpPushFieldCopy{OpPushField: OpPushField{alias.fieldIdx}},
+						&OpReturnIntoObjectPop{OpReturnIntoObject: OpReturnIntoObject{fieldKey}},
+					)
 					size += 2 + 1 + len(fieldKey)
 				}
 			} else {
@@ -461,10 +500,10 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 							size += fieldReq.size
 
 							if fieldReq.outputKey == fieldKey {
-								patch = append(patch, OpReturnIntoObjectKeyless{})
+								patch = append(patch, &OpReturnIntoObjectKeylessPop{})
 								size += 1
 							} else {
-								patch = append(patch, OpReturnIntoObject{fieldKey})
+								patch = append(patch, &OpReturnIntoObjectPop{OpReturnIntoObject: OpReturnIntoObject{fieldKey}})
 								size += 1 + len(fieldKey)
 							}
 							didPatch = true
@@ -475,12 +514,14 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 				}
 
 				if !didPatch {
-					patch = append(patch, OpObjectSetFieldValue{fieldKey, fieldEntry.Value})
+					patch = append(patch, &OpObjectSetFieldValue{
+						OpValue{fieldEntry.Value},
+						OpReturnIntoObject{fieldKey},
+					})
 					size += 1 + len(fieldKey) + fieldEntry.Size
 				}
 			}
 		}
-
 
 		req := &reqs[cand.requestIdx]
 		req.update(patch, size, d.left.Entries[primaryIdx].Reference.Key)
@@ -498,9 +539,9 @@ type sliceAlias struct {
 }
 
 type sliceCandidate struct {
-	alias            map[int]sliceAlias
-	requestIdx       int
-	contextIdx       int
+	alias      map[int]sliceAlias
+	requestIdx int
+	contextIdx int
 }
 
 func (sc *sliceCandidate) init(contextIdx int, requestIdx int) {
@@ -623,7 +664,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		size := 0
 		patch := Patch{}
 
-		patch = append(patch, d.enterPatch(EnterBlank, contextIdx))
+		d.enterBlank(&patch, contextIdx)
 		size += 2
 
 		startSlice := -1
@@ -640,7 +681,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 				if alias.nextIsAdjacent {
 					// The next one is adjacent. We don't need to do anything!
 				} else {
-					patch = append(patch, OpArrayAppendSlice{startSlice, alias.elementIdx + 1})
+					patch = append(patch, &OpArrayAppendSlice{startSlice, alias.elementIdx + 1})
 					size += 3
 					startSlice = -1
 				}
@@ -652,7 +693,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 						if elementReq.patch != nil {
 							patch = append(patch, elementReq.patch...)
 							size += elementReq.size
-							patch = append(patch, OpReturnIntoArray{})
+							patch = append(patch, &OpReturnIntoArrayPop{})
 							size += 1
 
 							didPatch = true
@@ -663,7 +704,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 				}
 
 				if !didPatch {
-					patch = append(patch, OpArrayAppendValue{elementEntry.Value})
+					patch = append(patch, &OpArrayAppendValue{elementEntry.Value})
 					size += 1 + elementEntry.Size
 				}
 			}
@@ -721,13 +762,13 @@ func (d *differ) reconstructString(idx int, rightString string, reqs []request) 
 		patch := Patch{}
 		size := 0
 
-		patch = append(patch, d.enterPatch(EnterBlank, req.primaryIdx))
+		d.enterBlank(&patch, req.primaryIdx)
 		size += 2
 
 		prefix := commonPrefix(leftString, rightString)
 
 		if prefix > 0 {
-			patch = append(patch, OpStringAppendSlice{0, prefix})
+			patch = append(patch, &OpStringAppendSlice{0, prefix})
 			size += 3
 		}
 
@@ -735,12 +776,12 @@ func (d *differ) reconstructString(idx int, rightString string, reqs []request) 
 
 		mid := rightString[prefix : len(rightString)-suffix]
 		if len(mid) > 0 {
-			patch = append(patch, OpStringAppendString{mid})
+			patch = append(patch, &OpStringAppendString{mid})
 			size += 1 + len(mid)
 		}
 
 		if suffix > 0 {
-			patch = append(patch, OpStringAppendSlice{len(leftString) - suffix, len(leftString)})
+			patch = append(patch, &OpStringAppendSlice{len(leftString) - suffix, len(leftString)})
 			size += 3
 		}
 
