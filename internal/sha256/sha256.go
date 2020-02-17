@@ -14,7 +14,7 @@ import (
 )
 
 // The size of a SHA256 checksum in bytes.
-const Size = 8
+const Size = 16
 
 // The size of a SHA224 checksum in bytes.
 const Size224 = 28
@@ -230,8 +230,8 @@ func (d *Digest) CheckSum() [Size]byte {
 
 	binary.BigEndian.PutUint32(digest[0:], d.h[0])
 	binary.BigEndian.PutUint32(digest[4:], d.h[1])
-	//binary.BigEndian.PutUint32(digest[8:], d.h[2])
-	//binary.BigEndian.PutUint32(digest[12:], d.h[3])
+	binary.BigEndian.PutUint32(digest[8:], d.h[2])
+	binary.BigEndian.PutUint32(digest[12:], d.h[3])
 
 	return digest
 }
