@@ -19,7 +19,8 @@ $ dozadiff left.json right.json
 
 - Lightweight JSON format.
 - Flexible format which can accommodate more advanced encodings in the future.
-- Differ available as a Go library (this repo).
+- Differ/patcher available as a Go library (this repo).
+- Patcher available as a JavaScript library: [mendoza-js](https://github.com/sanity-io/mendoza-js).
 - Efficient handling of renaming of fields.
 - Efficient handling of reordering of arrays.
 - Not designed to be human readable.
