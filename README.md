@@ -12,7 +12,7 @@ $ cat left.json
 $ cat right.json
 {"firstName": "Bob Bobson", "age": 30, "skills": ["Diffing", "Go", "Patching"]}
 $ dozadiff left.json right.json
-[2,14,1,5,1,11,"firstName",6,2,15,"Diffing",16,0,2,11,"skills"]
+[19,1,10,1,14,"firstName",11,2,20,"Diffing",21,0,2,15]
 ```
 
 **Features / non-features:**
