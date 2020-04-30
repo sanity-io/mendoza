@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 )
 
 type jsonWriter struct {
@@ -73,53 +72,15 @@ func (r *jsonReader) tryEof() error {
 }
 
 func (r *jsonReader) ReadUint8() (uint8, error) {
-	num, err := r.ReadUint()
-	if err != nil {
-		return 0, err
-	}
-
-	if num >= 256 {
-		return 0, fmt.Errorf("expected uint8")
-	}
-
-	return uint8(num), nil
+	return ReadUint8FromValueReader(r)
 }
 
 func (r *jsonReader) ReadUint() (int, error) {
-	val, err := r.ReadValue()
-	if err != nil {
-		return 0, err
-	}
-
-	res, ok := val.(float64)
-	if !ok {
-		return 0, fmt.Errorf("expected number")
-	}
-
-	intVal, fracVal := math.Modf(res)
-	if fracVal != 0 {
-		return 0, fmt.Errorf("expected integer")
-	}
-
-	if intVal < 0 {
-		return 0, fmt.Errorf("expected positive integer")
-	}
-
-	return int(intVal), nil
+	return ReadUintFromValueReader(r)
 }
 
 func (r *jsonReader) ReadString() (string, error) {
-	val, err := r.ReadValue()
-	if err != nil {
-		return "", err
-	}
-
-	res, ok := val.(string)
-	if !ok {
-		return "", fmt.Errorf("expected string")
-	}
-
-	return res, nil
+	return ReadStringFromValueReader(r)
 }
 
 func (r *jsonReader) ReadValue() (interface{}, error) {
@@ -148,6 +109,31 @@ func (r *jsonReader) expectArray() error {
 	return nil
 }
 
+type jsonValueReader struct {
+	data []interface{}
+	idx int
+}
+
+func (r *jsonValueReader) ReadUint8() (uint8, error) {
+	return ReadUint8FromValueReader(r)
+}
+
+func (r *jsonValueReader) ReadUint() (int, error) {
+	return ReadUintFromValueReader(r)
+}
+
+func (r *jsonValueReader) ReadString() (string, error) {
+	return ReadStringFromValueReader(r)
+}
+
+func (r *jsonValueReader) ReadValue() (interface{}, error) {
+	if r.idx >= len(r.data) {
+		return nil, io.EOF
+	}
+	idx := r.idx
+	r.idx++
+	return r.data[idx], nil
+}
 
 func (patch Patch) MarshalJSON() ([]byte, error) {
 	w := jsonWriter{}
@@ -168,20 +154,11 @@ func (patch *Patch) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	*patch = Patch{}
+	return patch.ReadFrom(&r)
+}
 
-	for {
-		op, err := ReadFrom(&r)
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			return err
-		}
-
-		*patch = append(*patch, op)
-	}
-
-	return nil
+// DecodeJSON decodes a patch from an []interface{} as parsed by encoding/json.
+func (patch *Patch) DecodeJSON(data []interface{}) error {
+	r := jsonValueReader{data: data}
+	return patch.ReadFrom(&r)
 }

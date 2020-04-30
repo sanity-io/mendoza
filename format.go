@@ -1,6 +1,10 @@
 package mendoza
 
-import "fmt"
+import (
+	"fmt"
+	"io"
+	"math"
+)
 
 // Writer is an interface for writing values. This can be used for supporting a custom serialization format.
 type Writer interface {
@@ -15,6 +19,10 @@ type Reader interface {
 	ReadUint8() (uint8, error)
 	ReadUint() (int, error)
 	ReadString() (string, error)
+	ReadValue() (interface{}, error)
+}
+
+type ValueReader interface {
 	ReadValue() (interface{}, error)
 }
 
@@ -201,6 +209,75 @@ func (patch Patch) WriteTo(w Writer) error {
 	}
 
 	return nil
+}
+
+func (patch *Patch) ReadFrom(r Reader) error {
+	*patch = Patch{}
+
+	for {
+		op, err := ReadFrom(r)
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return err
+		}
+
+		*patch = append(*patch, op)
+	}
+
+	return nil
+}
+
+func ReadUint8FromValueReader(r ValueReader) (uint8, error) {
+	num, err := ReadUintFromValueReader(r)
+	if err != nil {
+		return 0, err
+	}
+
+	if num >= 256 {
+		return 0, fmt.Errorf("expected uint8")
+	}
+
+	return uint8(num), nil
+}
+
+func ReadUintFromValueReader(r ValueReader) (int, error) {
+	val, err := r.ReadValue()
+	if err != nil {
+		return 0, err
+	}
+
+	res, ok := val.(float64)
+	if !ok {
+		return 0, fmt.Errorf("expected number")
+	}
+
+	intVal, fracVal := math.Modf(res)
+	if fracVal != 0 {
+		return 0, fmt.Errorf("expected integer")
+	}
+
+	if intVal < 0 {
+		return 0, fmt.Errorf("expected positive integer")
+	}
+
+	return int(intVal), nil
+}
+
+func ReadStringFromValueReader(r ValueReader) (string, error) {
+	val, err := r.ReadValue()
+	if err != nil {
+		return "", err
+	}
+
+	res, ok := val.(string)
+	if !ok {
+		return "", fmt.Errorf("expected string")
+	}
+
+	return res, nil
 }
 
 // Implementations:

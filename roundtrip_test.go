@@ -102,6 +102,19 @@ var Documents = []struct {
 	},
 }
 
+func decodePatch(data []byte, patch *mendoza.Patch) error {
+	var value []interface{}
+	err := json.Unmarshal(data, &value)
+	if err != nil {
+		return err
+	}
+	err = patch.DecodeJSON(value)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func TestRoundtrip(t *testing.T) {
 	for idx, pair := range Documents {
 		t.Run(fmt.Sprintf("N%d", idx), func(t *testing.T) {
@@ -125,18 +138,22 @@ func TestRoundtrip(t *testing.T) {
 			// Now try to encode and decode the patch
 			json1, err := json.Marshal(patch1)
 			require.NoError(t, err)
-			var parsedPatch1 mendoza.Patch
+			var parsedPatch1, decodedPatch1 mendoza.Patch
 			err = json.Unmarshal(json1, &parsedPatch1)
 			require.NoError(t, err)
-
+			err = decodePatch(json1, &decodedPatch1)
 			require.EqualValues(t, patch1, parsedPatch1)
+			require.EqualValues(t, parsedPatch1, decodedPatch1)
 
 			json2, err := json.Marshal(patch2)
 			require.NoError(t, err)
-			var parsedPatch2 mendoza.Patch
+			var parsedPatch2, decodedPatch2 mendoza.Patch
 			err = json.Unmarshal(json2, &parsedPatch2)
 			require.NoError(t, err)
+			err = decodePatch(json2, &decodedPatch2)
+			require.NoError(t, err)
 			require.EqualValues(t, patch2, parsedPatch2)
+			require.EqualValues(t, parsedPatch2, decodedPatch2)
 		})
 	}
 }
