@@ -24,6 +24,13 @@ Conceptually, a Mendoza patch is a list of operations:
 ```typescript
 type Patch = Operation[]
 
+type Operation = {
+  opcode: Opcode
+  params: Param[]
+}
+
+type Opcode = int8
+
 type Param = string | uint | JSON
 ```
 
@@ -34,7 +41,7 @@ Composite operations are merely shortcuts for multiple primitive operations to m
 
 ## JSON representation
 
-A JSON representation of a Mendoza patch is a single flat array.
+To minimize the space, Mendoza uses a single flat array when representing a patch as JSON.
 Each operation is encoded with its opcode followed by its parameters.
 
 .A Mendoza patch in JSON representation
