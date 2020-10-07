@@ -377,42 +377,42 @@ The indices refers to _byte offsets_ in UTF-8 encoding.
 |Composite
 |<<OpReturnIntoObjectSameKey,ReturnIntoObjectSameKey>> + <<OpPop,Pop>>
 
-|15
+|16
 |ReturnIntoArrayPop
 |Composite
 |<<OpReturnIntoArray,ReturnIntoArray>> + <<OpPop,Pop>>
 
-|16
+|17
 |ObjectSetFieldValue
 |Composite
 |<<OpValue,Value>> + <<OpReturnIntoObject,ReturnIntoObject>>
 
-|17
+|18
 |ObjectCopyField
 |Composite
 |<<OpPushField,PushField>> + <<OpCopy,Copy>> + <<OpReturnIntoObjectSameKey,ReturnIntoObjectSameKey>> + <<OpPop,Pop>>
 
-|18
+|19
 |<<OpObjectDeleteField,ObjectDeleteField>>
 |Output
 |
 
-|19
+|20
 |<<OpArrayAppendValue,ArrayAppendValue>>
 |Output
 |
 
-|20
+|21
 |<<OpArrayAppendSlice,ArrayAppendSlice>>
 |Output
 |
 
-|21
+|22
 |<<OpStringAppendString,StringAppendString>>
 |Output
 |
 
-|22
+|23
 |<<OpStringAppendSlice,StringAppendSlice>>
 |Output
 |
