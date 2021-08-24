@@ -248,45 +248,26 @@ func ReadUintFromValueReader(r ValueReader) (int, error) {
 		return 0, err
 	}
 
-	parseAsFloat64 := func(val interface{}) (int, error) {
-		res, ok := val.(float64)
-		if !ok {
-			return 0, fmt.Errorf("expected float64")
-		}
-
-		intVal, fracVal := math.Modf(res)
+	// Check value type as float64 first (default number type on JSON marshalling). If it fails, try
+	// checking as int (default type for integer numbers in Go).
+	switch val := val.(type) {
+	case float64:
+		intVal, fracVal := math.Modf(val)
 		if fracVal != 0 {
-			return 0, fmt.Errorf("expected float64 as integer")
+			return 0, fmt.Errorf("expected float64 to be integer")
 		}
-
 		if intVal < 0 {
 			return 0, fmt.Errorf("expected float64 as positive integer")
 		}
-
 		return int(intVal), nil
-	}
-
-	parseAsInt := func(val interface{}) (int, error) {
-		res, ok := val.(int)
-		if !ok {
-			return 0, fmt.Errorf("expected int")
+	case int:
+		if val < 0 {
+			return 0, fmt.Errorf("expected int as positive integer")
 		}
-		return res, nil
+		return val, nil
+	default:
+		return 0, fmt.Errorf("expected float64 or int")
 	}
-
-	// Try parsing as float64 first (default number type on JSON marshalling). If it fails, try
-	// parsing as int (default type for integer numbers in Go).
-	v, err1 := parseAsFloat64(val)
-	if err1 == nil {
-		return v, nil
-	}
-
-	v, err2 := parseAsInt(val)
-	if err2 == nil {
-		return v, nil
-	}
-
-	return 0, fmt.Errorf("%s or %s", err1, err2)
 }
 
 func ReadStringFromValueReader(r ValueReader) (string, error) {
