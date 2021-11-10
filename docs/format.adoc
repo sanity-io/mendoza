@@ -363,7 +363,7 @@ The indices refers to _byte offsets_ in UTF-8 encoding.
 |<<OpPushElement,PushElement>> + <<OpCopy,Copy>>
 
 |13
-|PushFieldBlank
+|PushElementBlank
 |Composite
 |<<OpPushElement,PushElement>> + <<OpBlank,Blank>>
 
