@@ -4,14 +4,14 @@
 
 package sha256
 
-import "internal/cpu"
+import "golang.org/x/sys/cpu"
 
 var k = _K
 
 //go:noescape
 func sha256block(h []uint32, p []byte, k []uint32)
 
-func block(dig *digest, p []byte) {
+func block(dig *Digest, p []byte) {
 	if !cpu.ARM64.HasSHA2 {
 		blockGeneric(dig, p)
 	} else {
