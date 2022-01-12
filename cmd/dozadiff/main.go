@@ -22,11 +22,11 @@ func readJson(jsonPath string) (interface{}, error) {
 }
 
 func run(leftPath, rightPath string) error {
-	aDoc, err := readJson(os.Args[1])
+	aDoc, err := readJson(leftPath)
 	if err != nil {
 		return err
 	}
-	bDoc, err := readJson(os.Args[2])
+	bDoc, err := readJson(rightPath)
 	if err != nil {
 		return err
 	}
