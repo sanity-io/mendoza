@@ -3,8 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/sanity-io/mendoza"
 	"os"
+
+	"github.com/sanity-io/mendoza"
 )
 
 func readJson(jsonPath string) (interface{}, error) {
