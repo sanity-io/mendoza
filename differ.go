@@ -1,8 +1,9 @@
 package mendoza
 
 import (
-	"github.com/sanity-io/mendoza/internal/mendoza"
 	"unicode/utf8"
+
+	"github.com/sanity-io/mendoza/internal/mendoza"
 )
 
 type differ struct {
@@ -50,6 +51,7 @@ func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
 		left:      leftList,
 		right:     rightList,
 		hashIndex: hashIndex,
+		options:   options,
 	}
 	return differ.build(), nil
 }
@@ -143,7 +145,7 @@ func (d *differ) build() Patch {
 		},
 	}
 
-	d.reconstruct(0, reqs)
+	d.reconstruct(d.options.exactDiffReporter, 0, reqs)
 
 	req := reqs[0]
 
@@ -170,26 +172,30 @@ func (req *request) update(patch Patch, size int, outputKey string) {
 	}
 }
 
-func (d *differ) reconstruct(idx int, reqs []request) {
-	if len(reqs) == 0 {
-		return
-	}
-
+// reconstruct is the main entry point for calculating the diff of a value in the right-side document.
+func (d *differ) reconstruct(reporter ExactDiffReporter, idx int, reqs []request) {
 	entry := d.right.Entries[idx]
 
-	if entry.IsNonEmptyMap() {
-		d.reconstructMap(idx, reqs)
-		return
+	if len(reqs) > 0 {
+		if entry.IsNonEmptyMap() {
+			d.reconstructMap(reporter, idx, reqs)
+			// We return here because `reconstructMap` reports exact diffs recursively.
+			return
+		}
+
+		if entry.IsNonEmptySlice() {
+			d.reconstructSlice(reporter, idx, reqs)
+			// We return here because `reconstructMap` reports exact diffs recursively.
+			return
+		}
+
+		if rightString, ok := entry.Value.(string); ok {
+			d.reconstructString(idx, rightString, reqs)
+		}
 	}
 
-	if entry.IsNonEmptySlice() {
-		d.reconstructSlice(idx, reqs)
-		return
-	}
-
-	if rightString, ok := entry.Value.(string); ok {
-		d.reconstructString(idx, rightString, reqs)
-		return
+	if reporter != nil {
+		reporter.Report(entry.Value)
 	}
 }
 
@@ -275,6 +281,8 @@ func (mc *mapCandidate) init(contextIdx int, requestIdx int) {
 	mc.contextIdx = contextIdx
 }
 
+// insertAlias is invoked when we find that one value in the left map matches another value in the right map.
+// This will be invoked even if the key is different.
 func (mc *mapCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
 	current, currentOk := mc.alias[target.Key]
 
@@ -285,7 +293,6 @@ func (mc *mapCandidate) insertAlias(target mendoza.Reference, source mendoza.Ref
 			fieldIdx: source.Index,
 			sameKey:  true,
 		}
-		return
 	}
 
 	if currentOk {
@@ -304,6 +311,7 @@ func (mc *mapCandidate) insertAlias(target mendoza.Reference, source mendoza.Ref
 		fieldIdx: source.Index,
 		sameKey:  false,
 	}
+	return
 }
 
 func (mc *mapCandidate) IsMissing(reference mendoza.Reference) bool {
@@ -315,9 +323,10 @@ func (mc *mapCandidate) RegisterRequest(childIdx int, childRef mendoza.Reference
 	mc.seenKeys[childRef.Key] = struct{}{}
 }
 
-func (d *differ) reconstructMap(idx int, reqs []request) {
+func (d *differ) reconstructMap(reporter ExactDiffReporter, idx int, reqs []request) {
 	// right-index -> list of requests
 	fieldRequests := [][]request{}
+	fieldIsSame := []bool{}
 
 	// The input here is a list of requests. Each requests has _context_ and _primary_ which looks like this:
 	//
@@ -372,7 +381,8 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		fieldEntry := it.GetEntry()
-		fieldRequests = append(fieldRequests, nil)
+
+		isSame := false
 
 		for _, otherIdx := range d.hashIndex.Data[fieldEntry.Hash] {
 			otherEntry := d.left.Entries[otherIdx]
@@ -381,9 +391,15 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 				cand := &candidates[candIdx]
 				if cand.contextIdx == otherEntry.Parent {
 					cand.insertAlias(fieldEntry.Reference, otherEntry.Reference, fieldEntry.Size)
+					if fieldEntry.Reference.Key == otherEntry.Reference.Key {
+						isSame = true
+					}
 				}
 			}
 		}
+
+		fieldRequests = append(fieldRequests, nil)
+		fieldIsSame = append(fieldIsSame, isSame)
 	}
 
 	// Now build the requests
@@ -424,7 +440,18 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 	}
 
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		d.reconstruct(it.GetIndex(), fieldRequests[it.GetEntry().Reference.Index])
+		ref := it.GetEntry().Reference
+		fieldIdx := ref.Index
+		shouldReport := reporter != nil && !fieldIsSame[fieldIdx]
+		var childReporter ExactDiffReporter
+		if shouldReport {
+			childReporter = reporter
+			reporter.EnterField(ref.Key)
+		}
+		d.reconstruct(childReporter, it.GetIndex(), fieldRequests[fieldIdx])
+		if shouldReport {
+			reporter.LeaveField(ref.Key)
+		}
 	}
 
 	for _, cand := range candidates {
@@ -530,10 +557,6 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 	}
 }
 
-type sliceRequestData struct {
-	candidates map[int]*sliceCandidate
-}
-
 type sliceAlias struct {
 	elementIdx     int
 	prevIsAdjacent bool
@@ -597,9 +620,10 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 	}
 }
 
-func (d *differ) reconstructSlice(idx int, reqs []request) {
+func (d *differ) reconstructSlice(reporter ExactDiffReporter, idx int, reqs []request) {
 	// right-index -> requests
 	elementRequests := [][]request{}
+	elementIsSame := []bool{}
 
 	candidates := make([]sliceCandidate, 0, len(reqs))
 
@@ -615,7 +639,8 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		elementEntry := it.GetEntry()
-		elementRequests = append(elementRequests, nil)
+
+		isSame := false
 
 		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
 			otherEntry := d.left.Entries[otherIdx]
@@ -624,9 +649,15 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 				cand := &candidates[candIdx]
 				if cand.contextIdx == otherEntry.Parent {
 					cand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
+					if elementEntry.Reference.Index == otherEntry.Reference.Index {
+						isSame = true
+					}
 				}
 			}
 		}
+
+		elementRequests = append(elementRequests, nil)
+		elementIsSame = append(elementIsSame, isSame)
 	}
 
 	// Now build the requests
@@ -658,7 +689,17 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 	}
 
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		d.reconstruct(it.GetIndex(), elementRequests[it.GetEntry().Reference.Index])
+		ref := it.GetEntry().Reference
+		shouldReport := reporter != nil && !elementIsSame[ref.Index]
+		var childReporter ExactDiffReporter
+		if shouldReport {
+			childReporter = reporter
+			reporter.EnterElement(ref.Index)
+		}
+		d.reconstruct(childReporter, it.GetIndex(), elementRequests[ref.Index])
+		if shouldReport {
+			reporter.LeaveElement(ref.Index)
+		}
 	}
 
 	for _, cand := range candidates {
