@@ -1,7 +1,7 @@
 package mendoza
 
 type Options struct {
-	convertFunc func(value interface{}) interface{}
+	convertFunc func(value any) any
 }
 
 // The default options.
@@ -11,7 +11,7 @@ var DefaultOptions = Options{}
 //
 // The convert function is applied by CreatePatch and ApplyPatch to every value it looks at.
 // This can be used to support additional types by converting it into one of the supported types.
-func (options Options) WithConvertFunc(convertFunc func(value interface{}) interface{}) Options {
+func (options Options) WithConvertFunc(convertFunc func(value any) any) Options {
 	options.convertFunc = convertFunc
 	return options
 }

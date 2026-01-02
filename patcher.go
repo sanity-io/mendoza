@@ -1,29 +1,30 @@
 package mendoza
 
 import (
+	"maps"
 	"sort"
 )
 
 type outputEntry struct {
-	source         interface{}
-	writableArray  []interface{}
-	writableObject map[string]interface{}
+	source         any
+	writableArray  []any
+	writableObject map[string]any
 	writableString string
 }
 
 type inputEntry struct {
 	key    string
-	value  interface{}
+	value  any
 	fields []fieldEntry
 }
 
 type fieldEntry struct {
 	key   string
-	value interface{}
+	value any
 }
 
 type patcher struct {
-	root        interface{}
+	root        any
 	inputStack  []inputEntry
 	outputStack []outputEntry
 	options     *Options
@@ -33,7 +34,7 @@ type patcher struct {
 // cannot be applied (e.g., the document structure doesn't match).
 //
 // This function uses the default options.
-func ApplyPatch(root interface{}, patch Patch) (interface{}, error) {
+func ApplyPatch(root any, patch Patch) (any, error) {
 	return DefaultOptions.ApplyPatch(root, patch)
 }
 
@@ -41,13 +42,13 @@ func ApplyPatch(root interface{}, patch Patch) (interface{}, error) {
 // cannot be applied (e.g., the document structure doesn't match).
 //
 // This function uses the default options.
-func MustApplyPatch(root interface{}, patch Patch) interface{} {
+func MustApplyPatch(root any, patch Patch) any {
 	return DefaultOptions.MustApplyPatch(root, patch)
 }
 
 // Applies a patch to a document. Returns an error if the patch
 // cannot be applied (e.g., the document structure doesn't match).
-func (options *Options) ApplyPatch(root interface{}, patch Patch) (interface{}, error) {
+func (options *Options) ApplyPatch(root any, patch Patch) (any, error) {
 	if len(patch) == 0 {
 		return root, nil
 	}
@@ -73,7 +74,7 @@ func (options *Options) ApplyPatch(root interface{}, patch Patch) (interface{}, 
 
 // MustApplyPatch applies a patch to a document. It panics if the patch
 // cannot be applied (e.g., the document structure doesn't match).
-func (options *Options) MustApplyPatch(root interface{}, patch Patch) interface{} {
+func (options *Options) MustApplyPatch(root any, patch Patch) any {
 	result, err := options.ApplyPatch(root, patch)
 	if err != nil {
 		panic(err)
@@ -101,7 +102,7 @@ func (patcher *patcher) outputEntry() *outputEntry {
 	return &patcher.outputStack[len(patcher.outputStack)-1]
 }
 
-func (entry *outputEntry) result() interface{} {
+func (entry *outputEntry) result() any {
 	if entry.writableObject != nil {
 		return entry.writableObject
 	}
@@ -119,7 +120,7 @@ func (entry *outputEntry) result() interface{} {
 
 func (entry *inputEntry) getField(idx int) (fieldEntry, error) {
 	if entry.fields == nil {
-		obj, ok := entry.value.(map[string]interface{})
+		obj, ok := entry.value.(map[string]any)
 		if !ok {
 			return fieldEntry{}, ErrInvalidPatch
 		}
@@ -146,16 +147,16 @@ func (entry *inputEntry) getField(idx int) (fieldEntry, error) {
 	return entry.fields[idx], nil
 }
 
-func (patcher *patcher) inputObject() (map[string]interface{}, error) {
-	obj, ok := patcher.inputEntry().value.(map[string]interface{})
+func (patcher *patcher) inputObject() (map[string]any, error) {
+	obj, ok := patcher.inputEntry().value.(map[string]any)
 	if !ok {
 		return nil, ErrInvalidPatch
 	}
 	return obj, nil
 }
 
-func (patcher *patcher) inputArray() ([]interface{}, error) {
-	arr, ok := patcher.inputEntry().value.([]interface{})
+func (patcher *patcher) inputArray() ([]any, error) {
+	arr, ok := patcher.inputEntry().value.([]any)
 	if !ok {
 		return nil, ErrInvalidPatch
 	}
@@ -170,27 +171,25 @@ func (patcher *patcher) inputString() (string, error) {
 	return str, nil
 }
 
-func (patcher *patcher) result() interface{} {
+func (patcher *patcher) result() any {
 	entry := patcher.outputStack[len(patcher.outputStack)-1]
 	return entry.result()
 }
 
-func (patcher *patcher) outputObject() (map[string]interface{}, error) {
+func (patcher *patcher) outputObject() (map[string]any, error) {
 	entry := &patcher.outputStack[len(patcher.outputStack)-1]
 
 	if entry.writableObject == nil {
 		if entry.source == nil {
-			entry.writableObject = make(map[string]interface{})
+			entry.writableObject = make(map[string]any)
 		} else {
-			src, ok := entry.source.(map[string]interface{})
+			src, ok := entry.source.(map[string]any)
 			if !ok {
 				return nil, ErrInvalidPatch
 			}
-			obj := make(map[string]interface{}, len(src))
+			obj := make(map[string]any, len(src))
 
-			for k, v := range src {
-				obj[k] = v
-			}
+			maps.Copy(obj, src)
 			entry.writableObject = obj
 		}
 	}
@@ -198,15 +197,15 @@ func (patcher *patcher) outputObject() (map[string]interface{}, error) {
 	return entry.writableObject, nil
 }
 
-func (patcher *patcher) outputArray() (*[]interface{}, error) {
+func (patcher *patcher) outputArray() (*[]any, error) {
 	entry := &patcher.outputStack[len(patcher.outputStack)-1]
 
 	if entry.source != nil {
-		src, ok := entry.source.([]interface{})
+		src, ok := entry.source.([]any)
 		if !ok {
 			return nil, ErrInvalidPatch
 		}
-		entry.writableArray = make([]interface{}, len(src))
+		entry.writableArray = make([]any, len(src))
 		copy(entry.writableArray, src)
 		entry.source = nil
 	}
