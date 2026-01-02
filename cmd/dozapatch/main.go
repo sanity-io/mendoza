@@ -8,7 +8,7 @@ import (
 	"github.com/sanity-io/mendoza"
 )
 
-func readJson(jsonPath string, data interface{}) ( error) {
+func readJson(jsonPath string, data interface{}) error {
 	jsonFile, err := os.Open(jsonPath)
 	if err != nil {
 		return err
