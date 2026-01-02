@@ -28,7 +28,10 @@ func run(originalPath, patchPath string) error {
 		return err
 	}
 
-	result := mendoza.ApplyPatch(original, patch)
+	result, err := mendoza.ApplyPatch(original, patch)
+	if err != nil {
+		return err
+	}
 
 	encoder := json.NewEncoder(os.Stdout)
 	if err := encoder.Encode(result); err != nil {

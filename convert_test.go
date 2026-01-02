@@ -42,7 +42,8 @@ func TestConvertObject(t *testing.T) {
 		patch, err := opts.CreatePatch(left, right)
 		require.NoError(t, err)
 
-		newRight := opts.ApplyPatch(left, patch)
+		newRight, err := opts.ApplyPatch(left, patch)
+		require.NoError(t, err)
 		require.EqualValues(t, result, newRight)
 	})
 
@@ -54,7 +55,8 @@ func TestConvertObject(t *testing.T) {
 		patch, err := opts.CreatePatch(left, right)
 		require.NoError(t, err)
 
-		newRight := opts.ApplyPatch(left, patch)
+		newRight, err := opts.ApplyPatch(left, patch)
+		require.NoError(t, err)
 		require.EqualValues(t, result, newRight)
 	})
 }
@@ -92,7 +94,8 @@ func TestConvertArray(t *testing.T) {
 		patch, err := opts.CreatePatch(left, right)
 		require.NoError(t, err)
 
-		newRight := opts.ApplyPatch(left, patch)
+		newRight, err := opts.ApplyPatch(left, patch)
+		require.NoError(t, err)
 		require.EqualValues(t, result, newRight)
 	})
 
@@ -104,7 +107,8 @@ func TestConvertArray(t *testing.T) {
 		patch, err := opts.CreatePatch(left, right)
 		require.NoError(t, err)
 
-		newRight := opts.ApplyPatch(left, patch)
+		newRight, err := opts.ApplyPatch(left, patch)
+		require.NoError(t, err)
 		require.EqualValues(t, result, newRight)
 	})
 }

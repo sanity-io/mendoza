@@ -29,19 +29,27 @@ type patcher struct {
 	options     *Options
 }
 
-// Applies a patch to a document. Note that this method can panic if
-// the document is not the same that was used to produce the patch.
+// Applies a patch to a document. Returns an error if the patch
+// cannot be applied (e.g., the document structure doesn't match).
 //
 // This function uses the default options.
-func ApplyPatch(root interface{}, patch Patch) interface{} {
+func ApplyPatch(root interface{}, patch Patch) (interface{}, error) {
 	return DefaultOptions.ApplyPatch(root, patch)
 }
 
-// Applies a patch to a document. Note that this method can panic if
-// the document is not the same that was used to produce the patch.
-func (options *Options) ApplyPatch(root interface{}, patch Patch) interface{} {
+// MustApplyPatch applies a patch to a document. It panics if the patch
+// cannot be applied (e.g., the document structure doesn't match).
+//
+// This function uses the default options.
+func MustApplyPatch(root interface{}, patch Patch) interface{} {
+	return DefaultOptions.MustApplyPatch(root, patch)
+}
+
+// Applies a patch to a document. Returns an error if the patch
+// cannot be applied (e.g., the document structure doesn't match).
+func (options *Options) ApplyPatch(root interface{}, patch Patch) (interface{}, error) {
 	if len(patch) == 0 {
-		return root
+		return root, nil
 	}
 
 	if options.convertFunc != nil {
@@ -55,10 +63,22 @@ func (options *Options) ApplyPatch(root interface{}, patch Patch) interface{} {
 	}
 
 	for _, op := range patch {
-		op.applyTo(&p)
+		if err := op.applyTo(&p); err != nil {
+			return nil, err
+		}
 	}
 
-	return p.result()
+	return p.result(), nil
+}
+
+// MustApplyPatch applies a patch to a document. It panics if the patch
+// cannot be applied (e.g., the document structure doesn't match).
+func (options *Options) MustApplyPatch(root interface{}, patch Patch) interface{} {
+	result, err := options.ApplyPatch(root, patch)
+	if err != nil {
+		panic(err)
+	}
+	return result
 }
 
 func (patcher *patcher) popInput() {
@@ -97,10 +117,13 @@ func (entry *outputEntry) result() interface{} {
 	return entry.source
 }
 
-func (entry *inputEntry) getField(idx int) fieldEntry {
+func (entry *inputEntry) getField(idx int) (fieldEntry, error) {
 	if entry.fields == nil {
+		obj, ok := entry.value.(map[string]interface{})
+		if !ok {
+			return fieldEntry{}, ErrInvalidPatch
+		}
 		fields := []fieldEntry{}
-		obj := entry.value.(map[string]interface{})
 		keys := []string{}
 		for key := range obj {
 			keys = append(keys, key)
@@ -116,19 +139,35 @@ func (entry *inputEntry) getField(idx int) fieldEntry {
 		entry.fields = fields
 	}
 
-	return entry.fields[idx]
+	if idx < 0 || idx >= len(entry.fields) {
+		return fieldEntry{}, ErrInvalidPatch
+	}
+
+	return entry.fields[idx], nil
 }
 
-func (patcher *patcher) inputObject() map[string]interface{} {
-	return patcher.inputEntry().value.(map[string]interface{})
+func (patcher *patcher) inputObject() (map[string]interface{}, error) {
+	obj, ok := patcher.inputEntry().value.(map[string]interface{})
+	if !ok {
+		return nil, ErrInvalidPatch
+	}
+	return obj, nil
 }
 
-func (patcher *patcher) inputArray() []interface{} {
-	return patcher.inputEntry().value.([]interface{})
+func (patcher *patcher) inputArray() ([]interface{}, error) {
+	arr, ok := patcher.inputEntry().value.([]interface{})
+	if !ok {
+		return nil, ErrInvalidPatch
+	}
+	return arr, nil
 }
 
-func (patcher *patcher) inputString() string {
-	return patcher.inputEntry().value.(string)
+func (patcher *patcher) inputString() (string, error) {
+	str, ok := patcher.inputEntry().value.(string)
+	if !ok {
+		return "", ErrInvalidPatch
+	}
+	return str, nil
 }
 
 func (patcher *patcher) result() interface{} {
@@ -136,14 +175,17 @@ func (patcher *patcher) result() interface{} {
 	return entry.result()
 }
 
-func (patcher *patcher) outputObject() map[string]interface{} {
+func (patcher *patcher) outputObject() (map[string]interface{}, error) {
 	entry := &patcher.outputStack[len(patcher.outputStack)-1]
 
 	if entry.writableObject == nil {
 		if entry.source == nil {
 			entry.writableObject = make(map[string]interface{})
 		} else {
-			src := entry.source.(map[string]interface{})
+			src, ok := entry.source.(map[string]interface{})
+			if !ok {
+				return nil, ErrInvalidPatch
+			}
 			obj := make(map[string]interface{}, len(src))
 
 			for k, v := range src {
@@ -153,77 +195,101 @@ func (patcher *patcher) outputObject() map[string]interface{} {
 		}
 	}
 
-	return entry.writableObject
+	return entry.writableObject, nil
 }
 
-func (patcher *patcher) outputArray() *[]interface{} {
+func (patcher *patcher) outputArray() (*[]interface{}, error) {
 	entry := &patcher.outputStack[len(patcher.outputStack)-1]
 
 	if entry.source != nil {
-		src := entry.source.([]interface{})
+		src, ok := entry.source.([]interface{})
+		if !ok {
+			return nil, ErrInvalidPatch
+		}
 		entry.writableArray = make([]interface{}, len(src))
 		copy(entry.writableArray, src)
 		entry.source = nil
 	}
 
-	return &entry.writableArray
+	return &entry.writableArray, nil
 }
 
-func (patcher *patcher) outputString() *string {
+func (patcher *patcher) outputString() (*string, error) {
 	entry := &patcher.outputStack[len(patcher.outputStack)-1]
 
 	if entry.source != nil {
-		src := entry.source.(string)
+		src, ok := entry.source.(string)
+		if !ok {
+			return nil, ErrInvalidPatch
+		}
 		entry.writableString = src
 		entry.source = nil
 	}
 
-	return &entry.writableString
+	return &entry.writableString, nil
 }
 
-func (op OpValue) applyTo(p *patcher) {
+func (op OpValue) applyTo(p *patcher) error {
 	p.outputStack = append(p.outputStack, outputEntry{
 		source: op.Value,
 	})
+	return nil
 }
 
-func (op OpCopy) applyTo(p *patcher) {
+func (op OpCopy) applyTo(p *patcher) error {
 	input := p.inputEntry()
 	p.outputStack = append(p.outputStack, outputEntry{
 		source: input.value,
 	})
+	return nil
 }
 
-func (op OpBlank) applyTo(p *patcher) {
+func (op OpBlank) applyTo(p *patcher) error {
 	p.outputStack = append(p.outputStack, outputEntry{
 		source: nil,
 	})
+	return nil
 }
 
-func (op OpReturnIntoObject) applyTo(p *patcher) {
+func (op OpReturnIntoObject) applyTo(p *patcher) error {
 	result := p.outputEntry().result()
 	p.popOutput()
-	obj := p.outputObject()
+	obj, err := p.outputObject()
+	if err != nil {
+		return err
+	}
 	obj[op.Key] = result
+	return nil
 }
 
-func (op OpReturnIntoObjectSameKey) applyTo(p *patcher) {
+func (op OpReturnIntoObjectSameKey) applyTo(p *patcher) error {
 	key := p.inputEntry().key
 	result := p.outputEntry().result()
 	p.popOutput()
-	obj := p.outputObject()
+	obj, err := p.outputObject()
+	if err != nil {
+		return err
+	}
 	obj[key] = result
+	return nil
 }
 
-func (op OpReturnIntoArray) applyTo(p *patcher) {
+func (op OpReturnIntoArray) applyTo(p *patcher) error {
 	result := p.outputEntry().result()
 	p.popOutput()
-	arr := p.outputArray()
+	arr, err := p.outputArray()
+	if err != nil {
+		return err
+	}
 	*arr = append(*arr, result)
+	return nil
 }
 
-func (op OpPushField) applyTo(p *patcher) {
-	field := p.inputEntry().getField(op.Index)
+func (op OpPushField) applyTo(p *patcher) error {
+	field, err := p.inputEntry().getField(op.Index)
+	if err != nil {
+		return err
+	}
 	value := field.value
 	if p.options.convertFunc != nil {
 		value = p.options.convertFunc(value)
@@ -232,99 +298,170 @@ func (op OpPushField) applyTo(p *patcher) {
 		key:   field.key,
 		value: value,
 	})
+	return nil
 }
 
-func (op OpPushElement) applyTo(p *patcher) {
-	value := p.inputArray()[op.Index]
+func (op OpPushElement) applyTo(p *patcher) error {
+	arr, err := p.inputArray()
+	if err != nil {
+		return err
+	}
+	if op.Index < 0 || op.Index >= len(arr) {
+		return ErrInvalidPatch
+	}
+	value := arr[op.Index]
 	if p.options.convertFunc != nil {
 		value = p.options.convertFunc(value)
 	}
 	p.inputStack = append(p.inputStack, inputEntry{
 		value: value,
 	})
+	return nil
 }
 
-func (op OpPushParent) applyTo(p *patcher) {
+func (op OpPushParent) applyTo(p *patcher) error {
 	idx := len(p.inputStack) - 2 - op.N
+	if idx < 0 || idx >= len(p.inputStack) {
+		return ErrInvalidPatch
+	}
 	entry := p.inputStack[idx]
 	p.inputStack = append(p.inputStack, entry)
+	return nil
 }
 
-func (op OpPop) applyTo(p *patcher) {
+func (op OpPop) applyTo(p *patcher) error {
 	p.popInput()
+	return nil
 }
 
-func (op OpPushFieldCopy) applyTo(p *patcher) {
-	op.OpPushField.applyTo(p)
-	op.OpCopy.applyTo(p)
+func (op OpPushFieldCopy) applyTo(p *patcher) error {
+	if err := op.OpPushField.applyTo(p); err != nil {
+		return err
+	}
+	return op.OpCopy.applyTo(p)
 }
 
-func (op OpPushFieldBlank) applyTo(p *patcher) {
-	op.OpPushField.applyTo(p)
-	op.OpBlank.applyTo(p)
+func (op OpPushFieldBlank) applyTo(p *patcher) error {
+	if err := op.OpPushField.applyTo(p); err != nil {
+		return err
+	}
+	return op.OpBlank.applyTo(p)
 }
 
-func (op OpPushElementCopy) applyTo(p *patcher) {
-	op.OpPushElement.applyTo(p)
-	op.OpCopy.applyTo(p)
+func (op OpPushElementCopy) applyTo(p *patcher) error {
+	if err := op.OpPushElement.applyTo(p); err != nil {
+		return err
+	}
+	return op.OpCopy.applyTo(p)
 }
 
-func (op OpPushElementBlank) applyTo(p *patcher) {
-	op.OpPushElement.applyTo(p)
-	op.OpBlank.applyTo(p)
+func (op OpPushElementBlank) applyTo(p *patcher) error {
+	if err := op.OpPushElement.applyTo(p); err != nil {
+		return err
+	}
+	return op.OpBlank.applyTo(p)
 }
 
-func (op OpReturnIntoObjectPop) applyTo(p *patcher) {
-	op.OpReturnIntoObject.applyTo(p)
-	op.OpPop.applyTo(p)
+func (op OpReturnIntoObjectPop) applyTo(p *patcher) error {
+	if err := op.OpReturnIntoObject.applyTo(p); err != nil {
+		return err
+	}
+	return op.OpPop.applyTo(p)
 }
 
-func (op OpReturnIntoObjectSameKeyPop) applyTo(p *patcher) {
-	op.OpReturnIntoObjectSameKey.applyTo(p)
-	op.OpPop.applyTo(p)
+func (op OpReturnIntoObjectSameKeyPop) applyTo(p *patcher) error {
+	if err := op.OpReturnIntoObjectSameKey.applyTo(p); err != nil {
+		return err
+	}
+	return op.OpPop.applyTo(p)
 }
 
-func (op OpReturnIntoArrayPop) applyTo(p *patcher) {
-	op.OpReturnIntoArray.applyTo(p)
-	op.OpPop.applyTo(p)
+func (op OpReturnIntoArrayPop) applyTo(p *patcher) error {
+	if err := op.OpReturnIntoArray.applyTo(p); err != nil {
+		return err
+	}
+	return op.OpPop.applyTo(p)
 }
 
-func (op OpObjectSetFieldValue) applyTo(p *patcher) {
-	op.OpValue.applyTo(p)
-	op.OpReturnIntoObject.applyTo(p)
+func (op OpObjectSetFieldValue) applyTo(p *patcher) error {
+	if err := op.OpValue.applyTo(p); err != nil {
+		return err
+	}
+	return op.OpReturnIntoObject.applyTo(p)
 }
 
-func (op OpObjectCopyField) applyTo(p *patcher) {
-	op.OpPushField.applyTo(p)
-	op.OpCopy.applyTo(p)
-	op.OpReturnIntoObjectSameKey.applyTo(p)
-	op.OpPop.applyTo(p)
+func (op OpObjectCopyField) applyTo(p *patcher) error {
+	if err := op.OpPushField.applyTo(p); err != nil {
+		return err
+	}
+	if err := op.OpCopy.applyTo(p); err != nil {
+		return err
+	}
+	if err := op.OpReturnIntoObjectSameKey.applyTo(p); err != nil {
+		return err
+	}
+	return op.OpPop.applyTo(p)
 }
 
-func (op OpObjectDeleteField) applyTo(p *patcher) {
-	field := p.inputEntry().getField(op.Index)
-	obj := p.outputObject()
+func (op OpObjectDeleteField) applyTo(p *patcher) error {
+	field, err := p.inputEntry().getField(op.Index)
+	if err != nil {
+		return err
+	}
+	obj, err := p.outputObject()
+	if err != nil {
+		return err
+	}
 	delete(obj, field.key)
+	return nil
 }
 
-func (op OpArrayAppendValue) applyTo(p *patcher) {
-	arr := p.outputArray()
+func (op OpArrayAppendValue) applyTo(p *patcher) error {
+	arr, err := p.outputArray()
+	if err != nil {
+		return err
+	}
 	*arr = append(*arr, op.Value)
+	return nil
 }
 
-func (op OpArrayAppendSlice) applyTo(p *patcher) {
-	src := p.inputArray()
-	arr := p.outputArray()
+func (op OpArrayAppendSlice) applyTo(p *patcher) error {
+	src, err := p.inputArray()
+	if err != nil {
+		return err
+	}
+	if op.Left < 0 || op.Right > len(src) || op.Left > op.Right {
+		return ErrInvalidPatch
+	}
+	arr, err := p.outputArray()
+	if err != nil {
+		return err
+	}
 	*arr = append(*arr, src[op.Left:op.Right]...)
+	return nil
 }
 
-func (op OpStringAppendString) applyTo(p *patcher) {
-	str := p.outputString()
+func (op OpStringAppendString) applyTo(p *patcher) error {
+	str, err := p.outputString()
+	if err != nil {
+		return err
+	}
 	*str = *str + op.String
+	return nil
 }
 
-func (op OpStringAppendSlice) applyTo(p *patcher) {
-	src := p.inputString()
-	str := p.outputString()
+func (op OpStringAppendSlice) applyTo(p *patcher) error {
+	src, err := p.inputString()
+	if err != nil {
+		return err
+	}
+	if op.Left < 0 || op.Right > len(src) || op.Left > op.Right {
+		return ErrInvalidPatch
+	}
+	str, err := p.outputString()
+	if err != nil {
+		return err
+	}
 	*str = *str + src[op.Left:op.Right]
+	return nil
 }

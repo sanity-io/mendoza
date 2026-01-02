@@ -129,10 +129,12 @@ func TestRoundtrip(t *testing.T) {
 			patch1, patch2, err := mendoza.CreateDoublePatch(left, right)
 			require.NoError(t, err)
 
-			result1 := mendoza.ApplyPatch(left, patch1)
+			result1, err := mendoza.ApplyPatch(left, patch1)
+			require.NoError(t, err)
 			require.EqualValues(t, right, result1)
 
-			result2 := mendoza.ApplyPatch(right, patch2)
+			result2, err := mendoza.ApplyPatch(right, patch2)
+			require.NoError(t, err)
 			require.EqualValues(t, left, result2)
 
 			// Now try to encode and decode the patch
