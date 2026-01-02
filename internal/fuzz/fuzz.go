@@ -65,12 +65,18 @@ func Fuzz(data []byte) int {
 		panic(err)
 	}
 
-	constructedRight := mendoza.ApplyPatch(left, patch1)
+	constructedRight, err := mendoza.ApplyPatch(left, patch1)
+	if err != nil {
+		panic(err)
+	}
 	if !reflect.DeepEqual(right, constructedRight) {
 		panic("up patch is incorrect")
 	}
 
-	constructedLeft := mendoza.ApplyPatch(right, patch2)
+	constructedLeft, err := mendoza.ApplyPatch(right, patch2)
+	if err != nil {
+		panic(err)
+	}
 	if !reflect.DeepEqual(left, constructedLeft) {
 		panic("down patch is incorrect")
 	}

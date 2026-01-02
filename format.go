@@ -11,7 +11,7 @@ type Writer interface {
 	WriteUint8(v uint8) error
 	WriteUint(v int) error
 	WriteString(v string) error
-	WriteValue(v interface{}) error
+	WriteValue(v any) error
 }
 
 // Reader is an interface for reading values. This can be used for supporting a custom serialization format.
@@ -19,11 +19,11 @@ type Reader interface {
 	ReadUint8() (uint8, error)
 	ReadUint() (int, error)
 	ReadString() (string, error)
-	ReadValue() (interface{}, error)
+	ReadValue() (any, error)
 }
 
 type ValueReader interface {
-	ReadValue() (interface{}, error)
+	ReadValue() (any, error)
 }
 
 // Note: This code is intentionally very verbose/repetitive in order to be forward compatible.

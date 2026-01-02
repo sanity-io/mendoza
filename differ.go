@@ -15,7 +15,7 @@ type differ struct {
 // Creates a patch which can be applied to the left document to produce the right document.
 //
 // This function uses the default options.
-func CreatePatch(left, right interface{}) (Patch, error) {
+func CreatePatch(left, right any) (Patch, error) {
 	return DefaultOptions.CreatePatch(left, right)
 }
 
@@ -23,12 +23,12 @@ func CreatePatch(left, right interface{}) (Patch, error) {
 // the second can be applied to the right document to produce the left document.
 //
 // This function uses the default options.
-func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
+func CreateDoublePatch(left, right any) (Patch, Patch, error) {
 	return DefaultOptions.CreateDoublePatch(left, right)
 }
 
 // Creates a patch which can be applied to the left document to produce the right document.
-func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
+func (options *Options) CreatePatch(left, right any) (Patch, error) {
 	if left == nil {
 		if right == nil {
 			return Patch{}, nil
@@ -56,7 +56,7 @@ func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
 
 // Creates two patches: The first can be applied to the left document to produce the right document,
 // the second can be applied to the right document to produce the left document.
-func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
+func (options *Options) CreateDoublePatch(left, right any) (Patch, Patch, error) {
 	if left == nil && right == nil {
 		return Patch{}, Patch{}, nil
 	}

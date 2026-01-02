@@ -8,7 +8,7 @@ import (
 	"github.com/sanity-io/mendoza"
 )
 
-func readJson(jsonPath string, data interface{}) ( error) {
+func readJson(jsonPath string, data any) error {
 	jsonFile, err := os.Open(jsonPath)
 	if err != nil {
 		return err
@@ -18,7 +18,7 @@ func readJson(jsonPath string, data interface{}) ( error) {
 }
 
 func run(originalPath, patchPath string) error {
-	var original interface{}
+	var original any
 	if err := readJson(originalPath, &original); err != nil {
 		return err
 	}
@@ -28,7 +28,10 @@ func run(originalPath, patchPath string) error {
 		return err
 	}
 
-	result := mendoza.ApplyPatch(original, patch)
+	result, err := mendoza.ApplyPatch(original, patch)
+	if err != nil {
+		return err
+	}
 
 	encoder := json.NewEncoder(os.Stdout)
 	if err := encoder.Encode(result); err != nil {

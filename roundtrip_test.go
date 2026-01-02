@@ -103,7 +103,7 @@ var Documents = []struct {
 }
 
 func decodePatch(data []byte, patch *mendoza.Patch) error {
-	var value []interface{}
+	var value []any
 	err := json.Unmarshal(data, &value)
 	if err != nil {
 		return err
@@ -118,7 +118,7 @@ func decodePatch(data []byte, patch *mendoza.Patch) error {
 func TestRoundtrip(t *testing.T) {
 	for idx, pair := range Documents {
 		t.Run(fmt.Sprintf("N%d", idx), func(t *testing.T) {
-			var left, right interface{}
+			var left, right any
 
 			err := json.Unmarshal([]byte(pair.Left), &left)
 			require.NoError(t, err)
@@ -129,10 +129,12 @@ func TestRoundtrip(t *testing.T) {
 			patch1, patch2, err := mendoza.CreateDoublePatch(left, right)
 			require.NoError(t, err)
 
-			result1 := mendoza.ApplyPatch(left, patch1)
+			result1, err := mendoza.ApplyPatch(left, patch1)
+			require.NoError(t, err)
 			require.EqualValues(t, right, result1)
 
-			result2 := mendoza.ApplyPatch(right, patch2)
+			result2, err := mendoza.ApplyPatch(right, patch2)
+			require.NoError(t, err)
 			require.EqualValues(t, left, result2)
 
 			// Now try to encode and decode the patch
