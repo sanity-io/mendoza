@@ -24,7 +24,7 @@ func (w *jsonWriter) WriteString(v string) error {
 	return w.WriteValue(v)
 }
 
-func (w *jsonWriter) WriteValue(v interface{}) error {
+func (w *jsonWriter) WriteValue(v any) error {
 	w.next()
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -83,12 +83,12 @@ func (r *jsonReader) ReadString() (string, error) {
 	return ReadStringFromValueReader(r)
 }
 
-func (r *jsonReader) ReadValue() (interface{}, error) {
+func (r *jsonReader) ReadValue() (any, error) {
 	err := r.tryEof()
 	if err != nil {
 		return nil, err
 	}
-	var val interface{}
+	var val any
 	err = r.dec.Decode(&val)
 	if err != nil {
 		return nil, err
@@ -110,8 +110,8 @@ func (r *jsonReader) expectArray() error {
 }
 
 type jsonValueReader struct {
-	data []interface{}
-	idx int
+	data []any
+	idx  int
 }
 
 func (r *jsonValueReader) ReadUint8() (uint8, error) {
@@ -126,7 +126,7 @@ func (r *jsonValueReader) ReadString() (string, error) {
 	return ReadStringFromValueReader(r)
 }
 
-func (r *jsonValueReader) ReadValue() (interface{}, error) {
+func (r *jsonValueReader) ReadValue() (any, error) {
 	if r.idx >= len(r.data) {
 		return nil, io.EOF
 	}
@@ -158,7 +158,7 @@ func (patch *Patch) UnmarshalJSON(data []byte) error {
 }
 
 // DecodeJSON decodes a patch from an []interface{} as parsed by encoding/json.
-func (patch *Patch) DecodeJSON(data []interface{}) error {
+func (patch *Patch) DecodeJSON(data []any) error {
 	r := jsonValueReader{data: data}
 	return patch.ReadFrom(&r)
 }

@@ -7,11 +7,11 @@ import (
 )
 
 type CustomObject struct {
-	attrs map[string]interface{}
+	attrs map[string]any
 }
 
 func TestConvertObject(t *testing.T) {
-	opts := mendoza.DefaultOptions.WithConvertFunc(func(value interface{}) interface{} {
+	opts := mendoza.DefaultOptions.WithConvertFunc(func(value any) any {
 		if value, ok := value.(CustomObject); ok {
 			return value.attrs
 		}
@@ -22,13 +22,13 @@ func TestConvertObject(t *testing.T) {
 	})
 
 	customLeft := CustomObject{
-		attrs: map[string]interface{}{
+		attrs: map[string]any{
 			"a": "abcdefgh",
 		},
 	}
 
 	customRight := CustomObject{
-		attrs: map[string]interface{}{
+		attrs: map[string]any{
 			"a": "abcdefgh",
 			"b": 123.0,
 		},
@@ -47,9 +47,9 @@ func TestConvertObject(t *testing.T) {
 	})
 
 	t.Run("Nested", func(t *testing.T) {
-		left := map[string]interface{}{"a": customLeft}
-		right := map[string]interface{}{"a": customRight}
-		result := map[string]interface{}{"a": customRight.attrs}
+		left := map[string]any{"a": customLeft}
+		right := map[string]any{"a": customRight}
+		result := map[string]any{"a": customRight.attrs}
 
 		patch, err := opts.CreatePatch(left, right)
 		require.NoError(t, err)
@@ -60,11 +60,11 @@ func TestConvertObject(t *testing.T) {
 }
 
 type CustomArray struct {
-	values []interface{}
+	values []any
 }
 
 func TestConvertArray(t *testing.T) {
-	opts := mendoza.DefaultOptions.WithConvertFunc(func(value interface{}) interface{} {
+	opts := mendoza.DefaultOptions.WithConvertFunc(func(value any) any {
 		if value, ok := value.(CustomArray); ok {
 			return value.values
 		}
@@ -72,13 +72,13 @@ func TestConvertArray(t *testing.T) {
 	})
 
 	customLeft := CustomArray{
-		[]interface{}{map[string]interface{}{
+		[]any{map[string]any{
 			"a": "abcdefgh",
 		}},
 	}
 
 	customRight := CustomArray{
-		[]interface{}{map[string]interface{}{
+		[]any{map[string]any{
 			"a": "abcdefgh",
 			"b": 123.0,
 		}},
@@ -97,9 +97,9 @@ func TestConvertArray(t *testing.T) {
 	})
 
 	t.Run("Nested", func(t *testing.T) {
-		left := map[string]interface{}{"a": customLeft}
-		right := map[string]interface{}{"a": customRight}
-		result := map[string]interface{}{"a": customRight.values}
+		left := map[string]any{"a": customLeft}
+		right := map[string]any{"a": customRight}
+		result := map[string]any{"a": customRight.values}
 
 		patch, err := opts.CreatePatch(left, right)
 		require.NoError(t, err)

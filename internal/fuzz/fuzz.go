@@ -48,7 +48,7 @@ func Fuzz(data []byte) int {
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(data))
-	var left, right interface{}
+	var left, right any
 
 	err := dec.Decode(&left)
 	if err != nil {

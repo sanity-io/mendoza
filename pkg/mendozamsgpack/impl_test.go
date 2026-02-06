@@ -38,15 +38,15 @@ func TestRoundtrip(t *testing.T) {
 }
 
 func TestSize(t *testing.T) {
-	left := map[string]interface{}{
+	left := map[string]any{
 		"_type": "Person",
-		"name": "Bob",
-		"age": 10.0,
+		"name":  "Bob",
+		"age":   10.0,
 	}
-	right := map[string]interface{}{
+	right := map[string]any{
 		"_type": "Person",
-		"name": "Bob",
-		"age": 15.0,
+		"name":  "Bob",
+		"age":   15.0,
 	}
 
 	patch, err := mendoza.CreatePatch(left, right)
