@@ -37,7 +37,6 @@ func Unmarshal(data []byte) (mendoza.Patch, error) {
 	return mendoza.Patch(mppatch), nil
 }
 
-
 type writer struct {
 	*msgpack.Encoder
 }
@@ -54,7 +53,7 @@ func (w writer) WriteString(v string) error {
 	return w.EncodeString(v)
 }
 
-func (w writer) WriteValue(v interface{}) error {
+func (w writer) WriteValue(v any) error {
 	return w.Encode(v)
 }
 
@@ -87,8 +86,8 @@ func (r reader) ReadString() (string, error) {
 	return r.DecodeString()
 }
 
-func (r reader) ReadValue() (interface{}, error) {
-	var result interface{}
+func (r reader) ReadValue() (any, error) {
+	var result any
 	err := r.Decode(&result)
 	if err != nil {
 		return nil, err

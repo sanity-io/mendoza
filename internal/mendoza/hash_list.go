@@ -8,11 +8,11 @@ import (
 // HashList stores a document as a flat list of entries. Each entry contains a hash of its contents, allowing you
 // to quickly find equivalent sub trees.
 type HashList struct {
-	Entries []HashEntry
-	convertFunc func(value interface{}) interface{}
+	Entries     []HashEntry
+	convertFunc func(value any) any
 }
 
-func HashListFor(doc interface{}, convertFunc func(value interface{}) interface{}) (*HashList, error) {
+func HashListFor(doc any, convertFunc func(value any) any) (*HashList, error) {
 	hashList := &HashList{convertFunc: convertFunc}
 	err := hashList.AddDocument(doc)
 	if err != nil {
@@ -37,7 +37,7 @@ func SliceEntryReference(idx int) Reference {
 type HashEntry struct {
 	Hash      Hash
 	XorHash   Hash
-	Value     interface{}
+	Value     any
 	Size      int
 	Parent    int
 	Sibling   int
@@ -45,21 +45,21 @@ type HashEntry struct {
 }
 
 func (entry *HashEntry) IsNonEmptyMap() bool {
-	val, ok := entry.Value.(map[string]interface{})
+	val, ok := entry.Value.(map[string]any)
 	return ok && len(val) > 0
 }
 
 func (entry *HashEntry) IsNonEmptySlice() bool {
-	val, ok := entry.Value.([]interface{})
+	val, ok := entry.Value.([]any)
 	return ok && len(val) > 0
 }
 
-func (hashList *HashList) AddDocument(obj interface{}) error {
+func (hashList *HashList) AddDocument(obj any) error {
 	_, _, err := hashList.process(-1, Reference{}, obj)
 	return err
 }
 
-func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (result Hash, size int, err error) {
+func (hashList *HashList) process(parent int, ref Reference, obj any) (result Hash, size int, err error) {
 	current := len(hashList.Entries)
 
 	var xorHash Hash
@@ -92,7 +92,7 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 	case string:
 		result = HashString(obj)
 		size = len(obj) + 1
-	case map[string]interface{}:
+	case map[string]any:
 		hasher := HasherMap
 		keys := sortedKeys(obj)
 
@@ -120,7 +120,7 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 		}
 
 		result = hasher.Sum()
-	case []interface{}:
+	case []any:
 		hasher := HasherSlice
 
 		prevIdx := -1
@@ -190,7 +190,7 @@ func (it *Iter) Next() {
 	it.idx = it.GetEntry().Sibling
 }
 
-func sortedKeys(m map[string]interface{}) []string {
+func sortedKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for key := range m {
 		keys = append(keys, key)
