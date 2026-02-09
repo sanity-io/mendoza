@@ -20,11 +20,17 @@
 // defines a function that is applied to every value.
 package mendoza
 
+import "errors"
+
+// ErrInvalidPatch is returned when a patch cannot be applied to a document,
+// typically because the document doesn't match the expected structure.
+var ErrInvalidPatch = errors.New("invalid patch: document structure does not match patch expectations")
+
 //go-sumtype:decl Op
 
 // Op is the interface for an operation.
 type Op interface {
-	applyTo(p *patcher)
+	applyTo(p *patcher) error
 	readParams(r Reader) error
 	writeParams(w Writer) error
 }
