@@ -536,18 +536,23 @@ type sliceRequestData struct {
 
 type sliceAlias struct {
 	elementIdx     int
+	set            bool
 	prevIsAdjacent bool
 	nextIsAdjacent bool
 }
 
 type sliceCandidate struct {
-	alias      map[int]sliceAlias
+	// alias is indexed by target.Index (a dense range 0..rightLen). The
+	// `set` field on sliceAlias discriminates present vs zero-valued slots.
+	// Replaces a `map[int]sliceAlias` whose hash/probe machinery dominated
+	// CPU profiles (see docs/perf/reconstruct-slice.md).
+	alias      []sliceAlias
 	requestIdx int
 	contextIdx int
 }
 
-func (sc *sliceCandidate) init(contextIdx int, requestIdx int) {
-	sc.alias = map[int]sliceAlias{}
+func (sc *sliceCandidate) init(contextIdx, requestIdx, rightLen int) {
+	sc.alias = make([]sliceAlias, rightLen)
 	sc.requestIdx = requestIdx
 	sc.contextIdx = contextIdx
 }
@@ -556,32 +561,37 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 	// We assume here that you'll only invoke this method in the same order
 	// as you want to build the array.
 
-	current, ok := sc.alias[target.Index]
+	idx := target.Index
+	current := sc.alias[idx]
+	ok := current.set
 
 	if ok && current.prevIsAdjacent {
 		// Once we've found something which is adjacent. Don't look any further.
 		return
 	}
 
-	if prevSource, prevOk := sc.alias[target.Index-1]; prevOk {
-		if prevSource.elementIdx+1 == source.Index {
-			// This one is perfectly adjacent. Use it!
-			sc.alias[target.Index] = sliceAlias{
-				elementIdx:     source.Index,
-				prevIsAdjacent: true,
-			}
-			prevSource.nextIsAdjacent = true
-			sc.alias[target.Index-1] = prevSource
-			return
-		}
-
-		if source.Index <= prevSource.elementIdx {
-			// We want to prefer values that are _after_ the previous index.
-
-			if ok {
-				// However, we can only return if we've already found a value.
-				// Otherwise we must use this new value.
+	if idx > 0 {
+		if prevSource := sc.alias[idx-1]; prevSource.set {
+			if prevSource.elementIdx+1 == source.Index {
+				// This one is perfectly adjacent. Use it!
+				sc.alias[idx] = sliceAlias{
+					elementIdx:     source.Index,
+					set:            true,
+					prevIsAdjacent: true,
+				}
+				prevSource.nextIsAdjacent = true
+				sc.alias[idx-1] = prevSource
 				return
+			}
+
+			if source.Index <= prevSource.elementIdx {
+				// We want to prefer values that are _after_ the previous index.
+
+				if ok {
+					// However, we can only return if we've already found a value.
+					// Otherwise we must use this new value.
+					return
+				}
 			}
 		}
 	}
@@ -591,8 +601,9 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 		return
 	}
 
-	sc.alias[target.Index] = sliceAlias{
+	sc.alias[idx] = sliceAlias{
 		elementIdx:     source.Index,
+		set:            true,
 		prevIsAdjacent: false,
 	}
 }
@@ -600,6 +611,9 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 func (d *differ) reconstructSlice(idx int, reqs []request) {
 	// right-index -> requests
 	elementRequests := [][]request{}
+
+	// reconstructSlice is only dispatched when the right entry is a non-empty slice.
+	rightLen := len(d.right.Entries[idx].Value.([]interface{}))
 
 	candidates := make([]sliceCandidate, 0, len(reqs))
 
@@ -609,7 +623,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		}
 
 		cand := sliceCandidate{}
-		cand.init(req.primaryIdx, i)
+		cand.init(req.primaryIdx, i, rightLen)
 		candidates = append(candidates, cand)
 	}
 
@@ -641,7 +655,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 
 			elementEntry := it.GetEntry()
 
-			if _, ok := cand.alias[elementEntry.Reference.Index]; !ok {
+			if !cand.alias[elementEntry.Reference.Index].set {
 				elementReqs := elementRequests[i]
 				elementReqs = append(elementReqs, request{
 					contextIdx: cand.contextIdx,
@@ -675,7 +689,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 			elementEntry := it.GetEntry()
 			pos := elementEntry.Reference.Index
 
-			if alias, ok := cand.alias[pos]; ok {
+			if alias := cand.alias[pos]; alias.set {
 				if startSlice == -1 {
 					startSlice = alias.elementIdx
 				}
