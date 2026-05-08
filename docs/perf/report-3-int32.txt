@@ -1,0 +1,72 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/sanity-io/mendoza
+cpu: Apple M1 Pro
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=100-10         	    2132	    514645 ns/op	  357249 B/op	    1130 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=100-10         	    2396	    509175 ns/op	  357249 B/op	    1130 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=100-10         	    2320	    499870 ns/op	  357249 B/op	    1130 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=100-10         	    2421	    504168 ns/op	  357248 B/op	    1130 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=100-10         	    2397	    508187 ns/op	  357248 B/op	    1130 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=100-10         	    2304	    515435 ns/op	  357249 B/op	    1130 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=500-10         	     445	   2622505 ns/op	 1487300 B/op	    2133 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=500-10         	     465	   2634843 ns/op	 1487300 B/op	    2133 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=500-10         	     456	   2635020 ns/op	 1487301 B/op	    2133 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=500-10         	     457	   2635925 ns/op	 1487299 B/op	    2133 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=500-10         	     460	   2618844 ns/op	 1487300 B/op	    2133 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=500-10         	     463	   2636869 ns/op	 1487301 B/op	    2133 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=1000-10        	     189	   6269678 ns/op	 4040857 B/op	    3249 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=1000-10        	     190	   6312732 ns/op	 4040863 B/op	    3249 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=1000-10        	     190	   6312318 ns/op	 4040867 B/op	    3249 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=1000-10        	     186	   6361918 ns/op	 4040873 B/op	    3249 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=1000-10        	     187	   6318765 ns/op	 4040860 B/op	    3249 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=1000-10        	     186	   6287439 ns/op	 4040871 B/op	    3249 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=2000-10        	      73	  15561455 ns/op	 7533361 B/op	    5377 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=2000-10        	      76	  15429737 ns/op	 7533286 B/op	    5377 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=2000-10        	      78	  15462677 ns/op	 7533313 B/op	    5377 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=2000-10        	      76	  15500639 ns/op	 7533294 B/op	    5377 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=2000-10        	      76	  15453828 ns/op	 7533328 B/op	    5378 allocs/op
+BenchmarkCreateDoublePatch_DuplicateHeavySlice/n=2000-10        	      76	  15475353 ns/op	 7533313 B/op	    5377 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=100-10         	     196	   6109804 ns/op	 3989772 B/op	   13092 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=100-10         	     195	   6112193 ns/op	 3989779 B/op	   13092 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=100-10         	     198	   6189769 ns/op	 3989770 B/op	   13092 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=100-10         	     195	   6163093 ns/op	 3989769 B/op	   13092 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=100-10         	     199	   6229602 ns/op	 3989767 B/op	   13092 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=100-10         	     188	   6179670 ns/op	 3989768 B/op	   13092 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=500-10         	      15	  77737783 ns/op	21506640 B/op	   62072 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=500-10         	      15	  74767917 ns/op	21506618 B/op	   62072 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=500-10         	      15	  74504939 ns/op	21506640 B/op	   62072 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=500-10         	      15	  75402042 ns/op	21506618 B/op	   62072 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=500-10         	      15	  74889225 ns/op	21506677 B/op	   62073 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=500-10         	      15	  74640089 ns/op	21506670 B/op	   62073 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=1000-10        	       4	 259860979 ns/op	45150472 B/op	  123180 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=1000-10        	       4	 260481448 ns/op	45150416 B/op	  123179 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=1000-10        	       4	 265219552 ns/op	45150416 B/op	  123179 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=1000-10        	       4	 264512886 ns/op	45150332 B/op	  123178 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=1000-10        	       4	 265268542 ns/op	45150444 B/op	  123179 allocs/op
+BenchmarkCreateDoublePatch_ScatteredDuplicates/arrays=10/n=1000-10        	       4	 263867052 ns/op	45150388 B/op	  123179 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=100-10                         	    2173	    567900 ns/op	  516114 B/op	    2090 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=100-10                         	    2136	    651519 ns/op	  516116 B/op	    2090 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=100-10                         	    2002	    749625 ns/op	  516115 B/op	    2090 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=100-10                         	    2068	    603277 ns/op	  516115 B/op	    2090 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=100-10                         	    2028	    788626 ns/op	  516119 B/op	    2090 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=100-10                         	    1981	    722392 ns/op	  516118 B/op	    2090 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=500-10                         	     412	   2908907 ns/op	 2201322 B/op	    7732 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=500-10                         	     402	   3272816 ns/op	 2201345 B/op	    7732 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=500-10                         	     370	   3180761 ns/op	 2201339 B/op	    7732 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=500-10                         	     404	   2969843 ns/op	 2201326 B/op	    7732 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=500-10                         	     409	   3991419 ns/op	 2201352 B/op	    7732 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=500-10                         	     391	   2930673 ns/op	 2201318 B/op	    7732 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=1000-10                        	     188	   6629980 ns/op	 5491369 B/op	   14780 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=1000-10                        	     196	   6088155 ns/op	 5491344 B/op	   14780 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=1000-10                        	     196	   6078406 ns/op	 5491350 B/op	   14780 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=1000-10                        	     200	   5914307 ns/op	 5491348 B/op	   14780 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=1000-10                        	     200	   5938959 ns/op	 5491348 B/op	   14780 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=1000-10                        	     204	   5912912 ns/op	 5491347 B/op	   14780 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=2000-10                        	     100	  11141189 ns/op	10456490 B/op	   28860 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=2000-10                        	     100	  11067674 ns/op	10456477 B/op	   28860 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=2000-10                        	     100	  11181218 ns/op	10456504 B/op	   28860 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=2000-10                        	     100	  11343599 ns/op	10456498 B/op	   28860 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=2000-10                        	     100	  11004522 ns/op	10456484 B/op	   28860 allocs/op
+BenchmarkCreateDoublePatch_DistinctSlice/n=2000-10                        	     100	  11042648 ns/op	10456473 B/op	   28860 allocs/op
+PASS
+ok  	github.com/sanity-io/mendoza	101.293s

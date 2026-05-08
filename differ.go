@@ -534,8 +534,12 @@ type sliceRequestData struct {
 	candidates map[int]*sliceCandidate
 }
 
+// sliceAlias fits in 8 bytes (int32 + 3 bools + 1 padding) so that the
+// reconstructSlice []sliceAlias slot is half the cache footprint of a
+// natural-sized {int, bool, bool, bool} (16 B). elementIdx is bounded by
+// the right slice's element count and never approaches 2^31 in practice.
 type sliceAlias struct {
-	elementIdx     int
+	elementIdx     int32
 	set            bool
 	prevIsAdjacent bool
 	nextIsAdjacent bool
@@ -562,6 +566,7 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 	// as you want to build the array.
 
 	idx := target.Index
+	srcIdx := int32(source.Index)
 	current := sc.alias[idx]
 	ok := current.set
 
@@ -572,10 +577,10 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 
 	if idx > 0 {
 		if prevSource := sc.alias[idx-1]; prevSource.set {
-			if prevSource.elementIdx+1 == source.Index {
+			if prevSource.elementIdx+1 == srcIdx {
 				// This one is perfectly adjacent. Use it!
 				sc.alias[idx] = sliceAlias{
-					elementIdx:     source.Index,
+					elementIdx:     srcIdx,
 					set:            true,
 					prevIsAdjacent: true,
 				}
@@ -584,7 +589,7 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 				return
 			}
 
-			if source.Index <= prevSource.elementIdx {
+			if srcIdx <= prevSource.elementIdx {
 				// We want to prefer values that are _after_ the previous index.
 
 				if ok {
@@ -596,13 +601,13 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 		}
 	}
 
-	if ok && current.elementIdx < source.Index {
+	if ok && current.elementIdx < srcIdx {
 		// Prefer smaller over larger
 		return
 	}
 
 	sc.alias[idx] = sliceAlias{
-		elementIdx:     source.Index,
+		elementIdx:     srcIdx,
 		set:            true,
 		prevIsAdjacent: false,
 	}
@@ -690,14 +695,15 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 			pos := elementEntry.Reference.Index
 
 			if alias := cand.alias[pos]; alias.set {
+				elementIdx := int(alias.elementIdx)
 				if startSlice == -1 {
-					startSlice = alias.elementIdx
+					startSlice = elementIdx
 				}
 
 				if alias.nextIsAdjacent {
 					// The next one is adjacent. We don't need to do anything!
 				} else {
-					patch = append(patch, &OpArrayAppendSlice{startSlice, alias.elementIdx + 1})
+					patch = append(patch, &OpArrayAppendSlice{startSlice, elementIdx + 1})
 					size += 3
 					startSlice = -1
 				}
