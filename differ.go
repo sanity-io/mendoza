@@ -10,6 +10,39 @@ type differ struct {
 	right     *mendoza.HashList
 	hashIndex *mendoza.HashIndex
 	options   *Options
+
+	// bucketPacked mirrors d.hashIndex.Data[hash] as a slice of uint64 where the
+	// low 32 bits encode otherIdx and the high 32 bits encode the parent
+	// (d.left.Entries[otherIdx].Parent). Walking this parallel array gives the
+	// hot inner loop in reconstructSlice both fields with a single sequential
+	// load per bucket entry, eliminating the cache-cold gather into a
+	// leftParents[otherIdx] / d.left.Entries[otherIdx].Parent that previously
+	// dominated the duplicate-heavy regime where buckets contain ~125 entries
+	// scattered across left.Entries. It also subsumes the d.hashIndex.Data map
+	// lookup that the loop used to do alongside leftParents, so we trade two
+	// memory taps per entry for one.
+	// Lazily populated by ensureBucketPacked on first reconstructSlice call.
+	bucketPacked map[mendoza.Hash][]uint64
+}
+
+// ensureBucketPacked lazily populates d.bucketPacked on first use. We avoid
+// doing this eagerly in build() because many diffs never call reconstructSlice.
+func (d *differ) ensureBucketPacked() {
+	if d.bucketPacked != nil {
+		return
+	}
+	src := d.hashIndex.Data
+	entries := d.left.Entries
+	bp := make(map[mendoza.Hash][]uint64, len(src))
+	for hash, bucket := range src {
+		packed := make([]uint64, len(bucket))
+		for i, otherIdx := range bucket {
+			parent := entries[otherIdx].Parent
+			packed[i] = uint64(uint32(int32(parent)))<<32 | uint64(uint32(int32(otherIdx)))
+		}
+		bp[hash] = packed
+	}
+	d.bucketPacked = bp
 }
 
 // Creates a patch which can be applied to the left document to produce the right document.
@@ -535,71 +568,100 @@ type sliceRequestData struct {
 }
 
 type sliceAlias struct {
-	elementIdx     int
+	elementIdx     int32
+	set            bool
 	prevIsAdjacent bool
 	nextIsAdjacent bool
 }
 
 type sliceCandidate struct {
-	alias      map[int]sliceAlias
+	alias      []sliceAlias
 	requestIdx int
 	contextIdx int
 }
 
-func (sc *sliceCandidate) init(contextIdx int, requestIdx int) {
-	sc.alias = map[int]sliceAlias{}
+func (sc *sliceCandidate) init(contextIdx int, requestIdx int, sliceLen int) {
+	sc.alias = make([]sliceAlias, sliceLen)
 	sc.requestIdx = requestIdx
 	sc.contextIdx = contextIdx
 }
 
-func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
-	// We assume here that you'll only invoke this method in the same order
-	// as you want to build the array.
+// insertAlias records source.Index as a possible left-side counterpart for the
+// right-side element at target.Index. It returns true when the alias is now
+// "locked in" (i.e. perfectly adjacent to its predecessor), meaning further
+// calls for the same (candidate, target) would no-op. Callers exploit this by
+// skipping subsequent calls for the rest of the hashIndex bucket, which in the
+// duplicate-heavy regime (~125 entries per bucket all sharing one parent) is
+// the dominant remaining cost in reconstructSlice's inner loop.
+//
+// We assume here that you'll only invoke this method in the same order as you
+// want to build the array.
+func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) bool {
+	current := sc.alias[target.Index]
 
-	current, ok := sc.alias[target.Index]
-
-	if ok && current.prevIsAdjacent {
+	if current.set && current.prevIsAdjacent {
 		// Once we've found something which is adjacent. Don't look any further.
-		return
+		return true
 	}
 
-	if prevSource, prevOk := sc.alias[target.Index-1]; prevOk {
-		if prevSource.elementIdx+1 == source.Index {
-			// This one is perfectly adjacent. Use it!
-			sc.alias[target.Index] = sliceAlias{
-				elementIdx:     source.Index,
-				prevIsAdjacent: true,
+	if target.Index > 0 {
+		prevSource := sc.alias[target.Index-1]
+		if prevSource.set {
+			if int(prevSource.elementIdx)+1 == source.Index {
+				// This one is perfectly adjacent. Use it!
+				sc.alias[target.Index] = sliceAlias{
+					elementIdx:     int32(source.Index),
+					set:            true,
+					prevIsAdjacent: true,
+				}
+				prevSource.nextIsAdjacent = true
+				sc.alias[target.Index-1] = prevSource
+				return true
 			}
-			prevSource.nextIsAdjacent = true
-			sc.alias[target.Index-1] = prevSource
-			return
-		}
 
-		if source.Index <= prevSource.elementIdx {
-			// We want to prefer values that are _after_ the previous index.
+			if source.Index <= int(prevSource.elementIdx) {
+				// We want to prefer values that are _after_ the previous index.
 
-			if ok {
-				// However, we can only return if we've already found a value.
-				// Otherwise we must use this new value.
-				return
+				if current.set {
+					// However, we can only return if we've already found a value.
+					// Otherwise we must use this new value.
+					return false
+				}
 			}
 		}
 	}
 
-	if ok && current.elementIdx < source.Index {
+	if current.set && int(current.elementIdx) < source.Index {
 		// Prefer smaller over larger
-		return
+		return false
 	}
 
 	sc.alias[target.Index] = sliceAlias{
-		elementIdx:     source.Index,
+		elementIdx:     int32(source.Index),
+		set:            true,
 		prevIsAdjacent: false,
 	}
+	return false
 }
 
 func (d *differ) reconstructSlice(idx int, reqs []request) {
+	// Determine right-slice length once so candidate alias arrays can be sized.
+	rightSlice, _ := d.right.Entries[idx].Value.([]interface{})
+	sliceLen := len(rightSlice)
+
+	// Materialize the right-side child entry indices once. The original code
+	// walked the sibling linked list (via d.right.Iter) four separate times
+	// and copied HashEntry by value through GetEntry() on every step; doing
+	// it once and indexing d.right.Entries with a pointer is significantly
+	// cheaper, especially in the duplicate-heavy regime.
+	rightEntries := d.right.Entries
+	rightChildren := make([]int, 0, sliceLen)
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		rightChildren = append(rightChildren, it.GetIndex())
+	}
+
 	// right-index -> requests
-	elementRequests := [][]request{}
+	elementRequests := make([][]request, sliceLen)
 
 	candidates := make([]sliceCandidate, 0, len(reqs))
 
@@ -609,22 +671,73 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		}
 
 		cand := sliceCandidate{}
-		cand.init(req.primaryIdx, i)
+		cand.init(req.primaryIdx, i, sliceLen)
 		candidates = append(candidates, cand)
 	}
 
-	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		elementEntry := it.GetEntry()
-		elementRequests = append(elementRequests, nil)
+	// Build a lookup from contextIdx -> candidate index so the inner loop
+	// below avoids an O(len(candidates)) linear scan per hashIndex bucket entry.
+	var candByContext map[int]int
+	if len(candidates) > 0 {
+		candByContext = make(map[int]int, len(candidates))
+		for i := range candidates {
+			candByContext[candidates[i].contextIdx] = i
+		}
+	}
 
-		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
-			otherEntry := d.left.Entries[otherIdx]
+	// Entries within a single hashIndex.Data[hash] bucket are stored in
+	// left.Entries-order. Siblings whose hashes match are therefore consecutive
+	// in the bucket (any intervening left entries have different hashes, so
+	// they're filtered out by the bucket itself). We exploit that here: cache
+	// the most recent candByContext lookup keyed by parent, and only redo the
+	// map probe when the parent changes. In the duplicate-heavy regime this
+	// collapses ~125 map lookups per right element down to 1, eliminating the
+	// mapaccess2_fast64 hotspot from the CPU profile.
+	//
+	// We additionally track a `locked` flag for the cached candidate: once an
+	// alias becomes perfectly adjacent to its predecessor, insertAlias will
+	// no-op on every subsequent call for the same (cand, target.Index) pair.
+	// Skipping those calls entirely (instead of paying the function-call +
+	// fast-path early-return on each) is the dominant win when buckets contain
+	// dozens-to-hundreds of same-parent entries, because we collapse ~125
+	// insertAlias calls per right element down to ~1.
+	d.ensureBucketPacked()
+	leftEntries := d.left.Entries
+	bucketPacked := d.bucketPacked
+	for _, entryIdx := range rightChildren {
+		elementEntry := &rightEntries[entryIdx]
+		targetIdx := elementEntry.Reference.Index
 
-			for candIdx := range candidates {
-				cand := &candidates[candIdx]
-				if cand.contextIdx == otherEntry.Parent {
-					cand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
+		prevParent := -2 // sentinel: real parents are >= -1
+		var cachedCand *sliceCandidate
+		var cachedMatched bool
+		var locked bool
+
+		for _, packed := range bucketPacked[elementEntry.Hash] {
+			// Both parent and otherIdx come out of one sequential uint64 load,
+			// avoiding the cache-cold gather into a separate leftParents array
+			// (or worse, the 96-byte HashEntry). otherIdx is only decoded when
+			// we actually take the slow path into insertAlias below — in the
+			// common locked / non-candidate case we skip that decode entirely.
+			parent := int(int32(packed >> 32))
+			if parent != prevParent {
+				prevParent = parent
+				if candIdx, ok := candByContext[parent]; ok {
+					cachedCand = &candidates[candIdx]
+					cachedMatched = true
+					// Re-derive locked status whenever we switch to a
+					// (possibly previously-seen) candidate. This handles the
+					// rare case where bucket ordering interleaves parents.
+					locked = cachedCand.alias[targetIdx].prevIsAdjacent
+				} else {
+					cachedMatched = false
+					locked = false
 				}
+			}
+			if cachedMatched && !locked {
+				otherIdx := int(int32(packed))
+				otherEntry := &leftEntries[otherIdx]
+				locked = cachedCand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
 			}
 		}
 	}
@@ -633,15 +746,14 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 	for _, cand := range candidates {
 		contextIter := d.left.Iter(cand.contextIdx)
 
-		i := 0
-		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		for i, entryIdx := range rightChildren {
 			if contextIter.IsDone() {
 				break
 			}
 
-			elementEntry := it.GetEntry()
+			elementEntry := &rightEntries[entryIdx]
 
-			if _, ok := cand.alias[elementEntry.Reference.Index]; !ok {
+			if !cand.alias[elementEntry.Reference.Index].set {
 				elementReqs := elementRequests[i]
 				elementReqs = append(elementReqs, request{
 					contextIdx: cand.contextIdx,
@@ -652,13 +764,13 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 
 			}
 
-			i++
 			contextIter.Next()
 		}
 	}
 
-	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		d.reconstruct(it.GetIndex(), elementRequests[it.GetEntry().Reference.Index])
+	for _, entryIdx := range rightChildren {
+		elementEntry := &rightEntries[entryIdx]
+		d.reconstruct(entryIdx, elementRequests[elementEntry.Reference.Index])
 	}
 
 	for _, cand := range candidates {
@@ -671,19 +783,19 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 
 		startSlice := -1
 
-		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-			elementEntry := it.GetEntry()
+		for _, entryIdx := range rightChildren {
+			elementEntry := &rightEntries[entryIdx]
 			pos := elementEntry.Reference.Index
 
-			if alias, ok := cand.alias[pos]; ok {
+			if alias := cand.alias[pos]; alias.set {
 				if startSlice == -1 {
-					startSlice = alias.elementIdx
+					startSlice = int(alias.elementIdx)
 				}
 
 				if alias.nextIsAdjacent {
 					// The next one is adjacent. We don't need to do anything!
 				} else {
-					patch = append(patch, &OpArrayAppendSlice{startSlice, alias.elementIdx + 1})
+					patch = append(patch, &OpArrayAppendSlice{startSlice, int(alias.elementIdx) + 1})
 					size += 3
 					startSlice = -1
 				}
