@@ -131,6 +131,125 @@ func BenchmarkCreateDoublePatch_ScatteredDuplicates(b *testing.B) {
 	}
 }
 
+// makeDistinctElement returns the i-th element of a stream of fully-distinct
+// values. Used to build asymmetric benchmark inputs.
+func makeDistinctElement(i int) interface{} {
+	return map[string]interface{}{
+		"_type": "block",
+		"key":   fmt.Sprintf("k-%d", i),
+		"value": fmt.Sprintf("v-%d", i),
+	}
+}
+
+// BenchmarkCreateDoublePatch_RightHeavy stresses the asymmetric case where
+// the target (right) slice is much larger than the source (left). Most of
+// the appended elements are fresh and have no left counterpart — so
+// insertAlias is rarely called, but opt #1 still allocates a `rightLen`-sized
+// alias slice per candidate. This is the "array grew significantly" mutation
+// shape (e.g., bulk append).
+func BenchmarkCreateDoublePatch_RightHeavy(b *testing.B) {
+	type sizes struct{ leftN, rightN int }
+	for _, c := range []sizes{
+		{100, 500},
+		{100, 1000},
+		{100, 5000},
+	} {
+		leftItems := make([]interface{}, c.leftN)
+		for i := 0; i < c.leftN; i++ {
+			leftItems[i] = makeDistinctElement(i)
+		}
+		rightItems := make([]interface{}, c.rightN)
+		for i := 0; i < c.leftN; i++ {
+			rightItems[i] = leftItems[i]
+		}
+		for i := c.leftN; i < c.rightN; i++ {
+			rightItems[i] = makeDistinctElement(1_000_000 + i) // fresh, no left counterpart
+		}
+		left := map[string]interface{}{"items": leftItems}
+		right := map[string]interface{}{"items": rightItems}
+
+		b.Run(fmt.Sprintf("left=%d/right=%d", c.leftN, c.rightN), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_, _, err := mendoza.CreateDoublePatch(left, right)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkCreateDoublePatch_LeftHeavy is the inverse: source is much larger
+// than target. Right elements all have left counterparts so insertAlias gets
+// called for each, but the alias slice is only rightLen-sized so memory cost
+// stays modest. This is the "array shrunk significantly" mutation shape.
+func BenchmarkCreateDoublePatch_LeftHeavy(b *testing.B) {
+	type sizes struct{ leftN, rightN int }
+	for _, c := range []sizes{
+		{500, 100},
+		{1000, 100},
+		{5000, 100},
+	} {
+		leftItems := make([]interface{}, c.leftN)
+		for i := 0; i < c.leftN; i++ {
+			leftItems[i] = makeDistinctElement(i)
+		}
+		rightItems := make([]interface{}, c.rightN)
+		for i := 0; i < c.rightN; i++ {
+			rightItems[i] = leftItems[i] // truncated copy of left
+		}
+		left := map[string]interface{}{"items": leftItems}
+		right := map[string]interface{}{"items": rightItems}
+
+		b.Run(fmt.Sprintf("left=%d/right=%d", c.leftN, c.rightN), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_, _, err := mendoza.CreateDoublePatch(left, right)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkCreateDoublePatch_ModestGrowth represents a typical real-world
+// mutation: small array grows by a few elements. Both sides stay close in
+// size; this is the workload mendoza should be optimal for.
+func BenchmarkCreateDoublePatch_ModestGrowth(b *testing.B) {
+	type sizes struct{ leftN, rightN int }
+	for _, c := range []sizes{
+		{100, 110},
+		{500, 510},
+		{1000, 1010},
+	} {
+		leftItems := make([]interface{}, c.leftN)
+		for i := 0; i < c.leftN; i++ {
+			leftItems[i] = makeDistinctElement(i)
+		}
+		rightItems := make([]interface{}, c.rightN)
+		for i := 0; i < c.leftN; i++ {
+			rightItems[i] = leftItems[i]
+		}
+		for i := c.leftN; i < c.rightN; i++ {
+			rightItems[i] = makeDistinctElement(1_000_000 + i)
+		}
+		left := map[string]interface{}{"items": leftItems}
+		right := map[string]interface{}{"items": rightItems}
+
+		b.Run(fmt.Sprintf("left=%d/right=%d", c.leftN, c.rightN), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_, _, err := mendoza.CreateDoublePatch(left, right)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkCreateDoublePatch_DistinctSlice is a control: same shape, same
 // size, but every element is unique so hashIndex buckets are size 1 and the
 // inner loops collapse. Comparing against the duplicate-heavy benchmark
