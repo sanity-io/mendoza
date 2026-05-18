@@ -10,6 +10,28 @@ type differ struct {
 	right     *mendoza.HashList
 	hashIndex *mendoza.HashIndex
 	options   *Options
+
+	// leftParents mirrors d.left.Entries[i].Parent as a compact int32 slice. The
+	// hot inner loop in reconstructSlice walks d.hashIndex.Data[hash] and only
+	// needs Parent for the (very common) case where insertAlias is short-circuited
+	// by the `locked` flag. Reading a 4-byte int32 from a tight parallel array
+	// avoids a cache-cold load of the full 96-byte HashEntry per bucket entry.
+	// Lazily populated by ensureLeftParents on first reconstructSlice call.
+	leftParents []int32
+}
+
+// ensureLeftParents lazily populates d.leftParents on first use. We avoid doing
+// this eagerly in build() because many diffs never call reconstructSlice.
+func (d *differ) ensureLeftParents() {
+	if d.leftParents != nil {
+		return
+	}
+	entries := d.left.Entries
+	p := make([]int32, len(entries))
+	for i := range entries {
+		p[i] = int32(entries[i].Parent)
+	}
+	d.leftParents = p
 }
 
 // Creates a patch which can be applied to the left document to produce the right document.
@@ -668,7 +690,9 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 	// fast-path early-return on each) is the dominant win when buckets contain
 	// dozens-to-hundreds of same-parent entries, because we collapse ~125
 	// insertAlias calls per right element down to ~1.
+	d.ensureLeftParents()
 	leftEntries := d.left.Entries
+	leftParents := d.leftParents
 	for _, entryIdx := range rightChildren {
 		elementEntry := &rightEntries[entryIdx]
 		targetIdx := elementEntry.Reference.Index
@@ -679,8 +703,12 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		var locked bool
 
 		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
-			otherEntry := &leftEntries[otherIdx]
-			parent := otherEntry.Parent
+			// Read just the parent from the compact int32 parallel array. This
+			// avoids touching the 96-byte HashEntry in the common case where
+			// the candidate is already `locked` and insertAlias would no-op:
+			// we only fall through to the full leftEntries[otherIdx] load when
+			// we actually need otherEntry.Reference for insertAlias below.
+			parent := int(leftParents[otherIdx])
 			if parent != prevParent {
 				prevParent = parent
 				if candIdx, ok := candByContext[parent]; ok {
@@ -696,6 +724,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 				}
 			}
 			if cachedMatched && !locked {
+				otherEntry := &leftEntries[otherIdx]
 				locked = cachedCand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
 			}
 		}
