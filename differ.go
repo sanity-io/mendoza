@@ -11,27 +11,38 @@ type differ struct {
 	hashIndex *mendoza.HashIndex
 	options   *Options
 
-	// leftParents mirrors d.left.Entries[i].Parent as a compact int32 slice. The
-	// hot inner loop in reconstructSlice walks d.hashIndex.Data[hash] and only
-	// needs Parent for the (very common) case where insertAlias is short-circuited
-	// by the `locked` flag. Reading a 4-byte int32 from a tight parallel array
-	// avoids a cache-cold load of the full 96-byte HashEntry per bucket entry.
-	// Lazily populated by ensureLeftParents on first reconstructSlice call.
-	leftParents []int32
+	// bucketPacked mirrors d.hashIndex.Data[hash] as a slice of uint64 where the
+	// low 32 bits encode otherIdx and the high 32 bits encode the parent
+	// (d.left.Entries[otherIdx].Parent). Walking this parallel array gives the
+	// hot inner loop in reconstructSlice both fields with a single sequential
+	// load per bucket entry, eliminating the cache-cold gather into a
+	// leftParents[otherIdx] / d.left.Entries[otherIdx].Parent that previously
+	// dominated the duplicate-heavy regime where buckets contain ~125 entries
+	// scattered across left.Entries. It also subsumes the d.hashIndex.Data map
+	// lookup that the loop used to do alongside leftParents, so we trade two
+	// memory taps per entry for one.
+	// Lazily populated by ensureBucketPacked on first reconstructSlice call.
+	bucketPacked map[mendoza.Hash][]uint64
 }
 
-// ensureLeftParents lazily populates d.leftParents on first use. We avoid doing
-// this eagerly in build() because many diffs never call reconstructSlice.
-func (d *differ) ensureLeftParents() {
-	if d.leftParents != nil {
+// ensureBucketPacked lazily populates d.bucketPacked on first use. We avoid
+// doing this eagerly in build() because many diffs never call reconstructSlice.
+func (d *differ) ensureBucketPacked() {
+	if d.bucketPacked != nil {
 		return
 	}
+	src := d.hashIndex.Data
 	entries := d.left.Entries
-	p := make([]int32, len(entries))
-	for i := range entries {
-		p[i] = int32(entries[i].Parent)
+	bp := make(map[mendoza.Hash][]uint64, len(src))
+	for hash, bucket := range src {
+		packed := make([]uint64, len(bucket))
+		for i, otherIdx := range bucket {
+			parent := entries[otherIdx].Parent
+			packed[i] = uint64(uint32(int32(parent)))<<32 | uint64(uint32(int32(otherIdx)))
+		}
+		bp[hash] = packed
 	}
-	d.leftParents = p
+	d.bucketPacked = bp
 }
 
 // Creates a patch which can be applied to the left document to produce the right document.
@@ -690,9 +701,9 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 	// fast-path early-return on each) is the dominant win when buckets contain
 	// dozens-to-hundreds of same-parent entries, because we collapse ~125
 	// insertAlias calls per right element down to ~1.
-	d.ensureLeftParents()
+	d.ensureBucketPacked()
 	leftEntries := d.left.Entries
-	leftParents := d.leftParents
+	bucketPacked := d.bucketPacked
 	for _, entryIdx := range rightChildren {
 		elementEntry := &rightEntries[entryIdx]
 		targetIdx := elementEntry.Reference.Index
@@ -702,13 +713,13 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		var cachedMatched bool
 		var locked bool
 
-		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
-			// Read just the parent from the compact int32 parallel array. This
-			// avoids touching the 96-byte HashEntry in the common case where
-			// the candidate is already `locked` and insertAlias would no-op:
-			// we only fall through to the full leftEntries[otherIdx] load when
-			// we actually need otherEntry.Reference for insertAlias below.
-			parent := int(leftParents[otherIdx])
+		for _, packed := range bucketPacked[elementEntry.Hash] {
+			// Both parent and otherIdx come out of one sequential uint64 load,
+			// avoiding the cache-cold gather into a separate leftParents array
+			// (or worse, the 96-byte HashEntry). otherIdx is only decoded when
+			// we actually take the slow path into insertAlias below — in the
+			// common locked / non-candidate case we skip that decode entirely.
+			parent := int(int32(packed >> 32))
 			if parent != prevParent {
 				prevParent = parent
 				if candIdx, ok := candByContext[parent]; ok {
@@ -724,6 +735,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 				}
 			}
 			if cachedMatched && !locked {
+				otherIdx := int(int32(packed))
 				otherEntry := &leftEntries[otherIdx]
 				locked = cachedCand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
 			}
