@@ -553,15 +553,22 @@ func (sc *sliceCandidate) init(contextIdx int, requestIdx int, sliceLen int) {
 	sc.contextIdx = contextIdx
 }
 
-func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
-	// We assume here that you'll only invoke this method in the same order
-	// as you want to build the array.
-
+// insertAlias records source.Index as a possible left-side counterpart for the
+// right-side element at target.Index. It returns true when the alias is now
+// "locked in" (i.e. perfectly adjacent to its predecessor), meaning further
+// calls for the same (candidate, target) would no-op. Callers exploit this by
+// skipping subsequent calls for the rest of the hashIndex bucket, which in the
+// duplicate-heavy regime (~125 entries per bucket all sharing one parent) is
+// the dominant remaining cost in reconstructSlice's inner loop.
+//
+// We assume here that you'll only invoke this method in the same order as you
+// want to build the array.
+func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) bool {
 	current := sc.alias[target.Index]
 
 	if current.set && current.prevIsAdjacent {
 		// Once we've found something which is adjacent. Don't look any further.
-		return
+		return true
 	}
 
 	if target.Index > 0 {
@@ -576,7 +583,7 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 				}
 				prevSource.nextIsAdjacent = true
 				sc.alias[target.Index-1] = prevSource
-				return
+				return true
 			}
 
 			if source.Index <= int(prevSource.elementIdx) {
@@ -585,7 +592,7 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 				if current.set {
 					// However, we can only return if we've already found a value.
 					// Otherwise we must use this new value.
-					return
+					return false
 				}
 			}
 		}
@@ -593,7 +600,7 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 
 	if current.set && int(current.elementIdx) < source.Index {
 		// Prefer smaller over larger
-		return
+		return false
 	}
 
 	sc.alias[target.Index] = sliceAlias{
@@ -601,6 +608,7 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 		set:            true,
 		prevIsAdjacent: false,
 	}
+	return false
 }
 
 func (d *differ) reconstructSlice(idx int, reqs []request) {
@@ -652,23 +660,43 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 	// map probe when the parent changes. In the duplicate-heavy regime this
 	// collapses ~125 map lookups per right element down to 1, eliminating the
 	// mapaccess2_fast64 hotspot from the CPU profile.
+	//
+	// We additionally track a `locked` flag for the cached candidate: once an
+	// alias becomes perfectly adjacent to its predecessor, insertAlias will
+	// no-op on every subsequent call for the same (cand, target.Index) pair.
+	// Skipping those calls entirely (instead of paying the function-call +
+	// fast-path early-return on each) is the dominant win when buckets contain
+	// dozens-to-hundreds of same-parent entries, because we collapse ~125
+	// insertAlias calls per right element down to ~1.
 	leftEntries := d.left.Entries
 	for _, entryIdx := range rightChildren {
 		elementEntry := &rightEntries[entryIdx]
+		targetIdx := elementEntry.Reference.Index
 
 		prevParent := -2 // sentinel: real parents are >= -1
-		var cachedCandIdx int
+		var cachedCand *sliceCandidate
 		var cachedMatched bool
+		var locked bool
 
 		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
 			otherEntry := &leftEntries[otherIdx]
 			parent := otherEntry.Parent
 			if parent != prevParent {
 				prevParent = parent
-				cachedCandIdx, cachedMatched = candByContext[parent]
+				if candIdx, ok := candByContext[parent]; ok {
+					cachedCand = &candidates[candIdx]
+					cachedMatched = true
+					// Re-derive locked status whenever we switch to a
+					// (possibly previously-seen) candidate. This handles the
+					// rare case where bucket ordering interleaves parents.
+					locked = cachedCand.alias[targetIdx].prevIsAdjacent
+				} else {
+					cachedMatched = false
+					locked = false
+				}
 			}
-			if cachedMatched {
-				candidates[cachedCandIdx].insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
+			if cachedMatched && !locked {
+				locked = cachedCand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
 			}
 		}
 	}
