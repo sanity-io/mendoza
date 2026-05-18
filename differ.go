@@ -644,14 +644,31 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		}
 	}
 
+	// Entries within a single hashIndex.Data[hash] bucket are stored in
+	// left.Entries-order. Siblings whose hashes match are therefore consecutive
+	// in the bucket (any intervening left entries have different hashes, so
+	// they're filtered out by the bucket itself). We exploit that here: cache
+	// the most recent candByContext lookup keyed by parent, and only redo the
+	// map probe when the parent changes. In the duplicate-heavy regime this
+	// collapses ~125 map lookups per right element down to 1, eliminating the
+	// mapaccess2_fast64 hotspot from the CPU profile.
+	leftEntries := d.left.Entries
 	for _, entryIdx := range rightChildren {
 		elementEntry := &rightEntries[entryIdx]
 
-		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
-			otherEntry := &d.left.Entries[otherIdx]
+		prevParent := -2 // sentinel: real parents are >= -1
+		var cachedCandIdx int
+		var cachedMatched bool
 
-			if candIdx, ok := candByContext[otherEntry.Parent]; ok {
-				candidates[candIdx].insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
+		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
+			otherEntry := &leftEntries[otherIdx]
+			parent := otherEntry.Parent
+			if parent != prevParent {
+				prevParent = parent
+				cachedCandIdx, cachedMatched = candByContext[parent]
+			}
+			if cachedMatched {
+				candidates[cachedCandIdx].insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
 			}
 		}
 	}
