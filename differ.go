@@ -608,8 +608,19 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 	rightSlice, _ := d.right.Entries[idx].Value.([]interface{})
 	sliceLen := len(rightSlice)
 
+	// Materialize the right-side child entry indices once. The original code
+	// walked the sibling linked list (via d.right.Iter) four separate times
+	// and copied HashEntry by value through GetEntry() on every step; doing
+	// it once and indexing d.right.Entries with a pointer is significantly
+	// cheaper, especially in the duplicate-heavy regime.
+	rightEntries := d.right.Entries
+	rightChildren := make([]int, 0, sliceLen)
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		rightChildren = append(rightChildren, it.GetIndex())
+	}
+
 	// right-index -> requests
-	elementRequests := make([][]request, 0, sliceLen)
+	elementRequests := make([][]request, sliceLen)
 
 	candidates := make([]sliceCandidate, 0, len(reqs))
 
@@ -633,12 +644,11 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		}
 	}
 
-	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		elementEntry := it.GetEntry()
-		elementRequests = append(elementRequests, nil)
+	for _, entryIdx := range rightChildren {
+		elementEntry := &rightEntries[entryIdx]
 
 		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
-			otherEntry := d.left.Entries[otherIdx]
+			otherEntry := &d.left.Entries[otherIdx]
 
 			if candIdx, ok := candByContext[otherEntry.Parent]; ok {
 				candidates[candIdx].insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
@@ -650,13 +660,12 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 	for _, cand := range candidates {
 		contextIter := d.left.Iter(cand.contextIdx)
 
-		i := 0
-		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		for i, entryIdx := range rightChildren {
 			if contextIter.IsDone() {
 				break
 			}
 
-			elementEntry := it.GetEntry()
+			elementEntry := &rightEntries[entryIdx]
 
 			if !cand.alias[elementEntry.Reference.Index].set {
 				elementReqs := elementRequests[i]
@@ -669,13 +678,13 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 
 			}
 
-			i++
 			contextIter.Next()
 		}
 	}
 
-	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		d.reconstruct(it.GetIndex(), elementRequests[it.GetEntry().Reference.Index])
+	for _, entryIdx := range rightChildren {
+		elementEntry := &rightEntries[entryIdx]
+		d.reconstruct(entryIdx, elementRequests[elementEntry.Reference.Index])
 	}
 
 	for _, cand := range candidates {
@@ -688,8 +697,8 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 
 		startSlice := -1
 
-		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-			elementEntry := it.GetEntry()
+		for _, entryIdx := range rightChildren {
+			elementEntry := &rightEntries[entryIdx]
 			pos := elementEntry.Reference.Index
 
 			if alias := cand.alias[pos]; alias.set {
