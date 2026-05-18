@@ -623,6 +623,16 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		candidates = append(candidates, cand)
 	}
 
+	// Build a lookup from contextIdx -> candidate index so the inner loop
+	// below avoids an O(len(candidates)) linear scan per hashIndex bucket entry.
+	var candByContext map[int]int
+	if len(candidates) > 0 {
+		candByContext = make(map[int]int, len(candidates))
+		for i := range candidates {
+			candByContext[candidates[i].contextIdx] = i
+		}
+	}
+
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		elementEntry := it.GetEntry()
 		elementRequests = append(elementRequests, nil)
@@ -630,11 +640,8 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
 			otherEntry := d.left.Entries[otherIdx]
 
-			for candIdx := range candidates {
-				cand := &candidates[candIdx]
-				if cand.contextIdx == otherEntry.Parent {
-					cand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
-				}
+			if candIdx, ok := candByContext[otherEntry.Parent]; ok {
+				candidates[candIdx].insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
 			}
 		}
 	}
