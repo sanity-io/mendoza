@@ -535,19 +535,20 @@ type sliceRequestData struct {
 }
 
 type sliceAlias struct {
-	elementIdx     int
+	elementIdx     int32
+	set            bool
 	prevIsAdjacent bool
 	nextIsAdjacent bool
 }
 
 type sliceCandidate struct {
-	alias      map[int]sliceAlias
+	alias      []sliceAlias
 	requestIdx int
 	contextIdx int
 }
 
-func (sc *sliceCandidate) init(contextIdx int, requestIdx int) {
-	sc.alias = map[int]sliceAlias{}
+func (sc *sliceCandidate) init(contextIdx int, requestIdx int, sliceLen int) {
+	sc.alias = make([]sliceAlias, sliceLen)
 	sc.requestIdx = requestIdx
 	sc.contextIdx = contextIdx
 }
@@ -556,50 +557,59 @@ func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.R
 	// We assume here that you'll only invoke this method in the same order
 	// as you want to build the array.
 
-	current, ok := sc.alias[target.Index]
+	current := sc.alias[target.Index]
 
-	if ok && current.prevIsAdjacent {
+	if current.set && current.prevIsAdjacent {
 		// Once we've found something which is adjacent. Don't look any further.
 		return
 	}
 
-	if prevSource, prevOk := sc.alias[target.Index-1]; prevOk {
-		if prevSource.elementIdx+1 == source.Index {
-			// This one is perfectly adjacent. Use it!
-			sc.alias[target.Index] = sliceAlias{
-				elementIdx:     source.Index,
-				prevIsAdjacent: true,
-			}
-			prevSource.nextIsAdjacent = true
-			sc.alias[target.Index-1] = prevSource
-			return
-		}
-
-		if source.Index <= prevSource.elementIdx {
-			// We want to prefer values that are _after_ the previous index.
-
-			if ok {
-				// However, we can only return if we've already found a value.
-				// Otherwise we must use this new value.
+	if target.Index > 0 {
+		prevSource := sc.alias[target.Index-1]
+		if prevSource.set {
+			if int(prevSource.elementIdx)+1 == source.Index {
+				// This one is perfectly adjacent. Use it!
+				sc.alias[target.Index] = sliceAlias{
+					elementIdx:     int32(source.Index),
+					set:            true,
+					prevIsAdjacent: true,
+				}
+				prevSource.nextIsAdjacent = true
+				sc.alias[target.Index-1] = prevSource
 				return
+			}
+
+			if source.Index <= int(prevSource.elementIdx) {
+				// We want to prefer values that are _after_ the previous index.
+
+				if current.set {
+					// However, we can only return if we've already found a value.
+					// Otherwise we must use this new value.
+					return
+				}
 			}
 		}
 	}
 
-	if ok && current.elementIdx < source.Index {
+	if current.set && int(current.elementIdx) < source.Index {
 		// Prefer smaller over larger
 		return
 	}
 
 	sc.alias[target.Index] = sliceAlias{
-		elementIdx:     source.Index,
+		elementIdx:     int32(source.Index),
+		set:            true,
 		prevIsAdjacent: false,
 	}
 }
 
 func (d *differ) reconstructSlice(idx int, reqs []request) {
+	// Determine right-slice length once so candidate alias arrays can be sized.
+	rightSlice, _ := d.right.Entries[idx].Value.([]interface{})
+	sliceLen := len(rightSlice)
+
 	// right-index -> requests
-	elementRequests := [][]request{}
+	elementRequests := make([][]request, 0, sliceLen)
 
 	candidates := make([]sliceCandidate, 0, len(reqs))
 
@@ -609,7 +619,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		}
 
 		cand := sliceCandidate{}
-		cand.init(req.primaryIdx, i)
+		cand.init(req.primaryIdx, i, sliceLen)
 		candidates = append(candidates, cand)
 	}
 
@@ -641,7 +651,7 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 
 			elementEntry := it.GetEntry()
 
-			if _, ok := cand.alias[elementEntry.Reference.Index]; !ok {
+			if !cand.alias[elementEntry.Reference.Index].set {
 				elementReqs := elementRequests[i]
 				elementReqs = append(elementReqs, request{
 					contextIdx: cand.contextIdx,
@@ -675,15 +685,15 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 			elementEntry := it.GetEntry()
 			pos := elementEntry.Reference.Index
 
-			if alias, ok := cand.alias[pos]; ok {
+			if alias := cand.alias[pos]; alias.set {
 				if startSlice == -1 {
-					startSlice = alias.elementIdx
+					startSlice = int(alias.elementIdx)
 				}
 
 				if alias.nextIsAdjacent {
 					// The next one is adjacent. We don't need to do anything!
 				} else {
-					patch = append(patch, &OpArrayAppendSlice{startSlice, alias.elementIdx + 1})
+					patch = append(patch, &OpArrayAppendSlice{startSlice, int(alias.elementIdx) + 1})
 					size += 3
 					startSlice = -1
 				}
