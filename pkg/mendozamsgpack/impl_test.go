@@ -1,6 +1,8 @@
 package mendozamsgpack_test
 
 import (
+	"encoding/json"
+	"fmt"
 	"github.com/sanity-io/mendoza"
 	"github.com/sanity-io/mendoza/pkg/mendozamsgpack"
 	"github.com/stretchr/testify/require"
@@ -64,4 +66,168 @@ func TestEmptyPatch(t *testing.T) {
 	b, err := mendozamsgpack.Marshal(patch)
 	require.NoError(t, err)
 	require.NotNil(t, b)
+}
+
+// TestStandaloneOpCodecsRoundtrip exercises the binary readParams/writeParams
+// implementations for op variants that the differ never emits as standalone
+// ops (they only appear as embedded fields inside composite ops). The only way
+// to cover their dispatch arms in format.go's ReadFrom/WriteTo and their own
+// readParams/writeParams is to construct synthetic patches directly.
+//
+// Each entry in `patch` triggers a specific switch case in WriteTo and
+// ReadFrom plus a pair of readParams/writeParams methods. Equality after
+// roundtrip confirms the bytes survive both directions.
+func TestStandaloneOpCodecsRoundtrip(t *testing.T) {
+	patch := mendoza.Patch{
+		// Empty-param codecs (codeCopy, codeReturnIntoObjectSameKey, codePop).
+		&mendoza.OpCopy{},
+		&mendoza.OpReturnIntoObjectSameKey{},
+		&mendoza.OpPop{},
+		// One-uint param (codePushParent).
+		&mendoza.OpPushParent{N: 0},
+		&mendoza.OpPushParent{N: 3},
+		// Composite codecs that wrap their embed (codePushElementCopy).
+		&mendoza.OpPushElementCopy{OpPushElement: mendoza.OpPushElement{Index: 0}},
+		&mendoza.OpPushElementCopy{OpPushElement: mendoza.OpPushElement{Index: 42}},
+		// Bare base ops without embedding (already covered, but kept so the
+		// EqualValues assertion has a stable mixed input shape).
+		&mendoza.OpReturnIntoArray{},
+	}
+
+	b, err := mendozamsgpack.Marshal(patch)
+	require.NoError(t, err)
+
+	decoded, err := mendozamsgpack.Unmarshal(b)
+	require.NoError(t, err)
+	require.EqualValues(t, patch, decoded)
+}
+
+// TestOpPushParentApply exercises patcher.go:322 OpPushParent.applyTo, which
+// the differ never emits — so it's only reachable from synthetic patches.
+// The op duplicates an existing input-stack entry (N=0 duplicates the parent
+// of the current top). After re-pushing the root, OpCopy stamps it onto the
+// output stack as the result.
+func TestOpPushParentApply(t *testing.T) {
+	root := map[string]interface{}{"a": float64(1), "b": float64(2)}
+
+	// Patch trace:
+	//  inputStack = [root]
+	//  outputStack = [{source: root}]
+	// OpPushField{0}      -> inputStack = [root, {key:"a", value:1}]
+	// OpPushParent{N:0}   -> idx = 2-2-0 = 0, push inputStack[0] (root)
+	//                        inputStack = [root, {value:1}, root]
+	// OpCopy{}            -> outputStack push {source: root}
+	//                        result() returns root.
+	patch := mendoza.Patch{
+		&mendoza.OpPushField{Index: 0},
+		&mendoza.OpPushParent{N: 0},
+		&mendoza.OpCopy{},
+	}
+
+	got, err := mendoza.MaybeApplyPatch(root, patch)
+	require.NoError(t, err)
+	require.EqualValues(t, root, got)
+
+	// Roundtrip the synthetic patch through msgpack and apply the decoded
+	// form — this lights up codePushParent / OpPushParent codec arms in
+	// format.go alongside OpPushParent.applyTo in patcher.go.
+	b, err := mendozamsgpack.Marshal(patch)
+	require.NoError(t, err)
+	decoded, err := mendozamsgpack.Unmarshal(b)
+	require.NoError(t, err)
+	got2, err := mendoza.MaybeApplyPatch(root, decoded)
+	require.NoError(t, err)
+	require.EqualValues(t, root, got2)
+
+	// Error path: N too large -> idx < 0 -> ErrInvalidPatch.
+	badPatch := mendoza.Patch{
+		&mendoza.OpPushParent{N: 99},
+	}
+	_, err = mendoza.MaybeApplyPatch(root, badPatch)
+	require.Error(t, err)
+}
+
+// TestBinaryRoundtripDocuments exercises the binary wire format
+// (format.go readParams/writeParams for every Op variant) by generating
+// real patches from a rich set of document pairs, marshalling them with
+// mendozamsgpack (which uses mendoza.WriteTo/ReadFrom internally), and
+// confirming both the resulting patch and the applied document match.
+func TestBinaryRoundtripDocuments(t *testing.T) {
+	pairs := []struct {
+		Left  string
+		Right string
+	}{
+		// Object field add/remove/change.
+		{`{"a":"a","b":"b","c":"c"}`, `{"a":"a","b":"b","c":"c","d":"d"}`},
+		{`{"a":"a","b":"b","c":"c"}`, `{"d":"d"}`},
+		// Nested object change.
+		{`{"a":"a","b":{"a":"a"}}`, `{"a":"a","b":{"a":"b","b":"a"}}`},
+		// Array reordering of similar objects (slice-alias ops).
+		{
+			`[{"k":"aaaaaaaaaaaaa"},{"k":"bbbbbbbbbbbbb"},{"k":"ccccccccccccc"}]`,
+			`[{"k":"bbbbbbbbbbbbb"},{"k":"ccccccccccccc"},{"k":"aaaaaaaaaaaaa"}]`,
+		},
+		// Long string with shared prefix/suffix (string slice + append ops).
+		{
+			`{"s":"common-prefix-shared-AAAAAAAAAA-common-suffix-shared-tail-tail-tail"}`,
+			`{"s":"common-prefix-shared-BBBBBBBBBB-common-suffix-shared-tail-tail-tail"}`,
+		},
+		// Same-key alias triggering OpObjectCopyField.
+		{
+			`{"x":"longvaluexxxxxxxxxxx","y":"longvaluexxxxxxxxxxx"}`,
+			`{"y":"longvaluexxxxxxxxxxx"}`,
+		},
+		// Different-key alias triggering OpReturnIntoObjectPop branch.
+		{
+			`{"x":"longvaluexxxxxxxxxxx"}`,
+			`{"y":"longvaluexxxxxxxxxxx"}`,
+		},
+		// Nested rename inside array triggering OpPushElementBlank.
+		{
+			`{"arr":[{"x":"longvaluexxxxxxxxxxx"}]}`,
+			`{"arr":[{"y":"longvaluexxxxxxxxxxx"}]}`,
+		},
+		// Mixed primitives in arrays and nulls/booleans/numbers.
+		{`[1,"two",true,null,{"k":0}]`, `[null,false,"two",2,{"k":1}]`},
+		{`{"a":true,"b":false,"c":null,"d":0}`, `{"a":false,"b":true,"c":1,"d":null}`},
+		// Deep nesting.
+		{
+			`{"a":{"b":{"c":{"d":{"e":[1,2,3]}}}}}`,
+			`{"a":{"b":{"c":{"d":{"e":[1,2,4]}}}}}`,
+		},
+		// Object with many fields (hash-index reuse).
+		{
+			`{"f00":0,"f01":1,"f02":2,"f03":3,"f04":4,"f05":5,"f06":6,"f07":7,"f08":8,"f09":9,"f10":10,"f11":11,"f12":12,"f13":13,"f14":14,"f15":15,"f16":16,"f17":17,"f18":18,"f19":19}`,
+			`{"f00":0,"f01":1,"f02":2,"f03":3,"f04":4,"f05":5,"f06":6,"f07":7,"f08":8,"f09":9,"f10":10,"f11":11,"f12":12,"f13":13,"f14":14,"f15":15,"f16":16,"f17":17,"f18":18,"f19":99}`,
+		},
+		// Plain string change.
+		{`"abc"`, `"abcdef"`},
+	}
+
+	for idx, pair := range pairs {
+		t.Run(fmt.Sprintf("N%d", idx), func(t *testing.T) {
+			var left, right interface{}
+			require.NoError(t, json.Unmarshal([]byte(pair.Left), &left))
+			require.NoError(t, json.Unmarshal([]byte(pair.Right), &right))
+
+			patch1, patch2, err := mendoza.CreateDoublePatch(left, right)
+			require.NoError(t, err)
+
+			// Forward: marshal then unmarshal patch1, applying must give right.
+			b1, err := mendozamsgpack.Marshal(patch1)
+			require.NoError(t, err)
+			decoded1, err := mendozamsgpack.Unmarshal(b1)
+			require.NoError(t, err)
+			require.EqualValues(t, patch1, decoded1)
+			require.EqualValues(t, right, mendoza.ApplyPatch(left, decoded1))
+
+			// Reverse direction exercises additional op variants in many cases.
+			b2, err := mendozamsgpack.Marshal(patch2)
+			require.NoError(t, err)
+			decoded2, err := mendozamsgpack.Unmarshal(b2)
+			require.NoError(t, err)
+			require.EqualValues(t, patch2, decoded2)
+			require.EqualValues(t, left, mendoza.ApplyPatch(right, decoded2))
+		})
+	}
 }

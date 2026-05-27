@@ -100,6 +100,68 @@ var Documents = []struct {
 		`"݆݆݅Ʌ"`,
 		`"І݆Ʌ"`,
 	},
+	// Same-key alias with blank-start: triggers OpObjectCopyField.
+	// Left has two fields sharing the same value-hash; right keeps only one
+	// (the same-key one), so removeCount == aliasCount and isCopy is false.
+	{
+		`{"x": "longvaluexxxxxxxxxxx", "y": "longvaluexxxxxxxxxxx"}`,
+		`{"y": "longvaluexxxxxxxxxxx"}`,
+	},
+	// Different-key alias with blank-start: triggers OpReturnIntoObjectPop
+	// (via the OpPushFieldCopy + OpReturnIntoObjectPop alias branch).
+	{
+		`{"x": "longvaluexxxxxxxxxxx"}`,
+		`{"y": "longvaluexxxxxxxxxxx"}`,
+	},
+	// Nested rename inside an array: triggers OpPushElementBlank, because the
+	// inner-map reconstruction starts blank and the parent in the left tree
+	// is a non-empty slice (so enterBlank emits OpPushElementBlank).
+	{
+		`{"arr": [{"x": "longvaluexxxxxxxxxxx"}]}`,
+		`{"arr": [{"y": "longvaluexxxxxxxxxxx"}]}`,
+	},
+	// Array of similar objects with one moving position; exercises the
+	// slice-alias adjacency logic (OpArrayAppendSlice with non-trivial bounds).
+	{
+		`[{"k":"aaaaaaaaaaaaa"},{"k":"bbbbbbbbbbbbb"},{"k":"ccccccccccccc"}]`,
+		`[{"k":"bbbbbbbbbbbbb"},{"k":"ccccccccccccc"},{"k":"aaaaaaaaaaaaa"}]`,
+	},
+	// Mixed primitives in arrays: numbers, strings, booleans, nulls, objects.
+	{
+		`[1, "two", true, null, {"k": 0}]`,
+		`[null, false, "two", 2, {"k": 1}]`,
+	},
+	// Booleans and nulls as object values.
+	{
+		`{"a": true, "b": false, "c": null, "d": 0}`,
+		`{"a": false, "b": true, "c": 1, "d": null}`,
+	},
+	// Numeric edges: zero, negative, fractional, large.
+	{
+		`{"a": 0, "b": -1, "c": 1.5, "d": 1000000000000}`,
+		`{"a": 1, "b": -2, "c": 2.5, "d": 1000000000001}`,
+	},
+	// Deep nesting (depth >= 4) with a single leaf change.
+	{
+		`{"a":{"b":{"c":{"d":{"e":[1,2,3]}}}}}`,
+		`{"a":{"b":{"c":{"d":{"e":[1,2,4]}}}}}`,
+	},
+	// Long string with a shared prefix, changed middle, and shared suffix
+	// (>= 64 chars). Triggers both OpStringAppendSlice and OpStringAppendString.
+	{
+		`{"s": "common-prefix-shared-AAAAAAAAAA-common-suffix-shared-tail-tail-tail"}`,
+		`{"s": "common-prefix-shared-BBBBBBBBBB-common-suffix-shared-tail-tail-tail"}`,
+	},
+	// Object with many (>=20) fields to exercise hash-index reuse.
+	{
+		`{"f00":0,"f01":1,"f02":2,"f03":3,"f04":4,"f05":5,"f06":6,"f07":7,"f08":8,"f09":9,"f10":10,"f11":11,"f12":12,"f13":13,"f14":14,"f15":15,"f16":16,"f17":17,"f18":18,"f19":19}`,
+		`{"f00":0,"f01":1,"f02":2,"f03":3,"f04":4,"f05":5,"f06":6,"f07":7,"f08":8,"f09":9,"f10":10,"f11":11,"f12":12,"f13":13,"f14":14,"f15":15,"f16":16,"f17":17,"f18":18,"f19":99}`,
+	},
+	// Empty objects swapped with non-empty siblings.
+	{
+		`{"a": {}, "b": {"x": 1}}`,
+		`{"a": {"x": 1}, "b": {}}`,
+	},
 }
 
 func decodePatch(data []byte, patch *mendoza.Patch) error {
