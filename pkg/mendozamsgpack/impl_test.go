@@ -68,6 +68,85 @@ func TestEmptyPatch(t *testing.T) {
 	require.NotNil(t, b)
 }
 
+// TestStandaloneOpCodecsRoundtrip exercises the binary readParams/writeParams
+// implementations for op variants that the differ never emits as standalone
+// ops (they only appear as embedded fields inside composite ops). The only way
+// to cover their dispatch arms in format.go's ReadFrom/WriteTo and their own
+// readParams/writeParams is to construct synthetic patches directly.
+//
+// Each entry in `patch` triggers a specific switch case in WriteTo and
+// ReadFrom plus a pair of readParams/writeParams methods. Equality after
+// roundtrip confirms the bytes survive both directions.
+func TestStandaloneOpCodecsRoundtrip(t *testing.T) {
+	patch := mendoza.Patch{
+		// Empty-param codecs (codeCopy, codeReturnIntoObjectSameKey, codePop).
+		&mendoza.OpCopy{},
+		&mendoza.OpReturnIntoObjectSameKey{},
+		&mendoza.OpPop{},
+		// One-uint param (codePushParent).
+		&mendoza.OpPushParent{N: 0},
+		&mendoza.OpPushParent{N: 3},
+		// Composite codecs that wrap their embed (codePushElementCopy).
+		&mendoza.OpPushElementCopy{OpPushElement: mendoza.OpPushElement{Index: 0}},
+		&mendoza.OpPushElementCopy{OpPushElement: mendoza.OpPushElement{Index: 42}},
+		// Bare base ops without embedding (already covered, but kept so the
+		// EqualValues assertion has a stable mixed input shape).
+		&mendoza.OpReturnIntoArray{},
+	}
+
+	b, err := mendozamsgpack.Marshal(patch)
+	require.NoError(t, err)
+
+	decoded, err := mendozamsgpack.Unmarshal(b)
+	require.NoError(t, err)
+	require.EqualValues(t, patch, decoded)
+}
+
+// TestOpPushParentApply exercises patcher.go:322 OpPushParent.applyTo, which
+// the differ never emits — so it's only reachable from synthetic patches.
+// The op duplicates an existing input-stack entry (N=0 duplicates the parent
+// of the current top). After re-pushing the root, OpCopy stamps it onto the
+// output stack as the result.
+func TestOpPushParentApply(t *testing.T) {
+	root := map[string]interface{}{"a": float64(1), "b": float64(2)}
+
+	// Patch trace:
+	//  inputStack = [root]
+	//  outputStack = [{source: root}]
+	// OpPushField{0}      -> inputStack = [root, {key:"a", value:1}]
+	// OpPushParent{N:0}   -> idx = 2-2-0 = 0, push inputStack[0] (root)
+	//                        inputStack = [root, {value:1}, root]
+	// OpCopy{}            -> outputStack push {source: root}
+	//                        result() returns root.
+	patch := mendoza.Patch{
+		&mendoza.OpPushField{Index: 0},
+		&mendoza.OpPushParent{N: 0},
+		&mendoza.OpCopy{},
+	}
+
+	got, err := mendoza.MaybeApplyPatch(root, patch)
+	require.NoError(t, err)
+	require.EqualValues(t, root, got)
+
+	// Roundtrip the synthetic patch through msgpack and apply the decoded
+	// form — this lights up codePushParent / OpPushParent codec arms in
+	// format.go alongside OpPushParent.applyTo in patcher.go.
+	b, err := mendozamsgpack.Marshal(patch)
+	require.NoError(t, err)
+	decoded, err := mendozamsgpack.Unmarshal(b)
+	require.NoError(t, err)
+	got2, err := mendoza.MaybeApplyPatch(root, decoded)
+	require.NoError(t, err)
+	require.EqualValues(t, root, got2)
+
+	// Error path: N too large -> idx < 0 -> ErrInvalidPatch.
+	badPatch := mendoza.Patch{
+		&mendoza.OpPushParent{N: 99},
+	}
+	_, err = mendoza.MaybeApplyPatch(root, badPatch)
+	require.Error(t, err)
+}
+
 // TestBinaryRoundtripDocuments exercises the binary wire format
 // (format.go readParams/writeParams for every Op variant) by generating
 // real patches from a rich set of document pairs, marshalling them with
