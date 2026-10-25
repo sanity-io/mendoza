@@ -37,24 +37,52 @@ func trimEnd(b []byte, start, end int) int {
 	return end
 }
 
+// stringEnd marks the bytes that end a run of plain string content.
+var stringEnd = [256]bool{'"': true, '\\': true}
+
+// shortString is how far skipString looks byte by byte before handing over
+// to bytes.IndexByte, whose setup costs more than it saves on short strings:
+// most strings in a document are keys and short values.
+const shortString = 32
+
 // skipString returns the index after the string starting at b[i] == '"',
 // and whether it contains escapes; -1 if it is not terminated.
 func skipString(b []byte, i int) (int, bool) {
 	esc := false
 	i++
-	for i <= len(b) {
-		q := bytes.IndexByte(b[i:], '"')
-		if q < 0 {
-			return -1, esc
+	for {
+		// One pass for either byte, while the string is short.
+		n := i + shortString
+		if n > len(b) {
+			n = len(b)
 		}
-		bs := bytes.IndexByte(b[i:i+q], '\\')
-		if bs < 0 {
-			return i + q + 1, esc
+		for i < n && !stringEnd[b[i]] {
+			i++
+		}
+		if i == n {
+			if n == len(b) {
+				return -1, esc
+			}
+			// A long string: find the quote, then check for escapes.
+			q := bytes.IndexByte(b[i:], '"')
+			if q < 0 {
+				return -1, esc
+			}
+			bs := bytes.IndexByte(b[i:i+q], '\\')
+			if bs < 0 {
+				return i + q + 1, esc
+			}
+			i += bs
+		}
+		if b[i] == '"' {
+			return i + 1, esc
 		}
 		esc = true
-		i += bs + 2 // the backslash and the byte it escapes
+		i += 2 // the backslash and the byte it escapes
+		if i >= len(b) {
+			return -1, esc
+		}
 	}
-	return -1, esc
 }
 
 // skipValue returns the index after the value starting at b[i], or -1.
