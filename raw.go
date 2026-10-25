@@ -103,6 +103,7 @@ type key struct {
 	buf        uint8
 	esc        bool
 	start, end int32
+	pre        uint64 // the first 8 bytes of its decoded content, big-endian
 }
 
 // A field is an object member of a document or patch value.
@@ -357,7 +358,7 @@ func (p *RawPatcher) paramString() (key, error) {
 	if e < 0 {
 		return key{}, ErrInvalidJSON
 	}
-	k := key{buf: bufPatch, esc: esc, start: int32(p.pos), end: int32(e)}
+	k := p.newKey(bufPatch, esc, p.pos, e)
 	p.pos = e
 	return k, nil
 }
@@ -925,7 +926,7 @@ func (p *RawPatcher) indexObject(buf uint8, start, end, kids, nkids int32) (int3
 		if ke < 0 {
 			return 0, 0, ErrInvalidJSON
 		}
-		k := key{buf: buf, esc: esc, start: int32(i), end: int32(ke)}
+		k := p.newKey(buf, esc, i, ke)
 		i = skipWS(b, ke)
 		if i >= e || b[i] != ':' {
 			return 0, 0, ErrInvalidJSON
@@ -953,9 +954,7 @@ func (p *RawPatcher) indexObject(buf uint8, start, end, kids, nkids int32) (int3
 	}
 	if !sorted {
 		fs := p.fields[first:]
-		p.fieldSort.p, p.fieldSort.s = p, fs
-		sort.Stable(&p.fieldSort)
-		p.fieldSort.p, p.fieldSort.s = nil, nil
+		p.sortFields(fs)
 		w := 0
 		for j := range fs {
 			if j+1 < len(fs) && p.compareKeys(fs[j].key, fs[j+1].key) == 0 {
@@ -1035,8 +1034,35 @@ func (p *RawPatcher) skipRecord(b []byte, i int) (int, bool, int32, int32) {
 	return -1, false, -1, 0
 }
 
-// compareKeys compares two keys by their decoded content.
+// newKey returns the key for the JSON string at buf[start:end].
+func (p *RawPatcher) newKey(buf uint8, esc bool, start, end int) key {
+	c := p.bytesOf(buf)[start+1 : end-1]
+	if esc {
+		p.ka = unescape(p.ka[:0], c)
+		c = p.ka
+	}
+	var pre uint64
+	for i := 0; i < 8 && i < len(c); i++ {
+		pre |= uint64(c[i]) << (56 - 8*uint(i))
+	}
+	return key{buf: buf, esc: esc, start: int32(start), end: int32(end), pre: pre}
+}
+
+// compareKeys compares two keys by their decoded content. Their first 8
+// bytes, compared as one integer, decide nearly every comparison; only keys
+// that agree on them are compared in full, in compareKeysSlow. This keeps
+// compareKeys small enough to inline into the sorts.
 func (p *RawPatcher) compareKeys(a, b key) int {
+	if a.pre != b.pre {
+		if a.pre < b.pre {
+			return -1
+		}
+		return 1
+	}
+	return p.compareKeysSlow(a, b)
+}
+
+func (p *RawPatcher) compareKeysSlow(a, b key) int {
 	ab := p.bytesOf(a.buf)[a.start+1 : a.end-1]
 	bb := p.bytesOf(b.buf)[b.start+1 : b.end-1]
 	if a.esc {
@@ -1048,6 +1074,48 @@ func (p *RawPatcher) compareKeys(a, b key) int {
 		bb = p.kb
 	}
 	return bytes.Compare(ab, bb)
+}
+
+// smallSort is the size up to which sortFields and sortItems use insertion
+// sort, calling compareKeys directly rather than through sort.Interface.
+// Most objects are smaller.
+const smallSort = 24
+
+// sortFields sorts fields stably by key.
+func (p *RawPatcher) sortFields(fs []field) {
+	if len(fs) > smallSort {
+		p.fieldSort.p, p.fieldSort.s = p, fs
+		sort.Stable(&p.fieldSort)
+		p.fieldSort.p, p.fieldSort.s = nil, nil
+		return
+	}
+	for i := 1; i < len(fs); i++ {
+		f := fs[i]
+		j := i
+		for ; j > 0 && p.compareKeys(f.key, fs[j-1].key) < 0; j-- {
+			fs[j] = fs[j-1]
+		}
+		fs[j] = f
+	}
+}
+
+// sortItems sorts item indices stably by their items' keys.
+func (p *RawPatcher) sortItems(ch []int32) {
+	if len(ch) > smallSort {
+		p.itemSort.p, p.itemSort.s = p, ch
+		sort.Stable(&p.itemSort)
+		p.itemSort.p, p.itemSort.s = nil, nil
+		return
+	}
+	for i := 1; i < len(ch); i++ {
+		c := ch[i]
+		k := p.items[c].key
+		j := i
+		for ; j > 0 && p.compareKeys(k, p.items[ch[j-1]].key) < 0; j-- {
+			ch[j] = ch[j-1]
+		}
+		ch[j] = c
+	}
 }
 
 type fieldSorter struct {
@@ -1146,9 +1214,7 @@ func (p *RawPatcher) emitObject(dst []byte, ni int32) ([]byte, error) {
 	}
 	if len(p.idx)-mark > 1 {
 		ch := p.idx[mark:]
-		p.itemSort.p, p.itemSort.s = p, ch
-		sort.Stable(&p.itemSort)
-		p.itemSort.p, p.itemSort.s = nil, nil
+		p.sortItems(ch)
 		w := 0
 		for j := range ch {
 			if j+1 < len(ch) && p.compareKeys(p.items[ch[j]].key, p.items[ch[j+1]].key) == 0 {
