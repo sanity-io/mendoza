@@ -183,9 +183,21 @@ func (p *RawPatcher) Apply(dst, doc, patch []byte) ([]byte, error) {
 	defer p.release()
 
 	start := skipWS(doc, 0)
-	end := skipValue(doc, start)
-	if end < 0 || skipWS(doc, end) != len(doc) {
+	end := trimEnd(doc, start, len(doc))
+	if start == end {
 		return dst, ErrInvalidJSON
+	}
+	switch doc[start] {
+	case '{', '[':
+		// Don't scan the whole document only to find where it ends: the
+		// patch scans what it needs. Check the brackets match.
+		if end-start < 2 || doc[end-1] != doc[start]+2 {
+			return dst, ErrInvalidJSON
+		}
+	default:
+		if skipValue(doc, start) != end {
+			return dst, ErrInvalidJSON
+		}
 	}
 	p.in = append(p.in, input{start: int32(start), end: int32(end), key: emptyKey, kids: -1, fields: -1, elems: -1})
 	root := ref{kind: refSpan, buf: bufDoc, start: int32(start), end: int32(end)}
