@@ -13,8 +13,6 @@ import (
 // is not well formed JSON.
 var ErrInvalidJSON = errors.New("mendoza: invalid JSON")
 
-var errTooLarge = errors.New("mendoza: document or patch larger than 2 GiB")
-
 // RawPatcher applies JSON encoded patches to JSON encoded documents without
 // decoding them.
 //
@@ -40,23 +38,24 @@ var errTooLarge = errors.New("mendoza: document or patch larger than 2 GiB")
 // copies them as they are. Malformed input gives an error or malformed
 // output, never a panic.
 type RawPatcher struct {
-	doc, patch, scratch []byte
+	doc, patch []byte
+	scratch    []byte // escaped substrings; starts with "", the empty key
 
-	pos int // read offset in patch
+	pos int   // read offset in patch
+	err error // the first error; after one, results are discarded
 
-	in     []input
-	out    []ref
-	nodes  []node
-	items  []item
-	fields []field
-	elems  []elem
-	kids   []kid
-	idx    []int32
+	in      []input  // the input stack
+	out     []ref    // the output stack
+	nodes   []node   // output values being changed
+	items   []item   // their contents, as linked lists
+	members []member // indexed objects and arrays
+	kids    []kid    // recorded while skipping; see kid
+	changes []item   // emitObject's sorted changes
 
 	ka, kb, str []byte // decode buffers
 
-	fieldSort fieldSorter
-	itemSort  itemSorter
+	memberSort memberSorter
+	changeSort changeSorter
 }
 
 var rawPatchers = sync.Pool{New: func() interface{} { return new(RawPatcher) }}
@@ -69,54 +68,132 @@ func ApplyRawPatch(doc, patch []byte) ([]byte, error) {
 	return p.Apply(nil, doc, patch)
 }
 
-// Buffers a span can point into.
+// Apply appends to dst the result of applying patch to doc. dst must not
+// overlap doc or patch.
+func (p *RawPatcher) Apply(dst, doc, patch []byte) ([]byte, error) {
+	p.reset(doc, patch)
+	defer p.release()
+
+	root, ok := rootSpan(doc)
+	if !ok {
+		return dst, ErrInvalidJSON
+	}
+	p.in = append(p.in, input{val: root, key: emptyKey})
+	p.push(p.docRef(root))
+	p.run()
+	if p.err != nil {
+		return dst, p.err
+	}
+	out := p.emit(dst, p.out[len(p.out)-1])
+	if p.err != nil { // emitting indexes objects the patch changed
+		return dst, p.err
+	}
+	return out, nil
+}
+
+func (p *RawPatcher) reset(doc, patch []byte) {
+	p.doc, p.patch = doc, patch
+	p.scratch = append(p.scratch[:0], `""`...)
+	p.pos, p.err = 0, nil
+	p.in = p.in[:0]
+	p.out = p.out[:0]
+	p.nodes = p.nodes[:0]
+	p.items = p.items[:0]
+	p.members = p.members[:0]
+	p.kids = p.kids[:0]
+	p.changes = p.changes[:0]
+}
+
+// release drops the caller's slices so a pooled RawPatcher doesn't keep
+// them alive.
+func (p *RawPatcher) release() {
+	p.doc, p.patch = nil, nil
+}
+
+func (p *RawPatcher) fail(err error) {
+	if p.err == nil {
+		p.err = err
+	}
+}
+
+// rootSpan returns the span of the document's value.
+func rootSpan(doc []byte) (span, bool) {
+	s := skipWS(doc, 0)
+	e := trimEnd(doc, s, len(doc))
+	if s == e {
+		return span{}, false
+	}
+	switch doc[s] {
+	case '{', '[':
+		// Don't scan the whole document just to find its end: the patch
+		// scans what it needs. Check the brackets match.
+		return span{s, e}, e-s >= 2 && doc[e-1] == doc[s]+2
+	}
+	return span{s, e}, skipValue(doc, s) == e
+}
+
+// Values.
+
+type span struct{ start, end int }
+
+// Buffers a ref or key can point into.
 const (
 	bufDoc uint8 = iota
 	bufPatch
 	bufScratch
-	bufConst
 )
 
-// constBuf holds the empty key, used by ReturnIntoObjectSameKey at the root.
-var constBuf = []byte(`""`)
-
-var emptyKey = key{buf: bufConst, start: 0, end: 2}
+func (p *RawPatcher) bytesOf(buf uint8) []byte {
+	switch buf {
+	case bufDoc:
+		return p.doc
+	case bufPatch:
+		return p.patch
+	default:
+		return p.scratch
+	}
+}
 
 // Kinds of ref.
 const (
-	refNull  uint8 = iota // null, or Blank
-	refSpan               // a whole JSON value
-	refNode               // a value under construction: nodes[start]
-	refElems              // in an array: comma separated elements
-	refChars              // in a string: escaped content, without quotes
+	refNull uint8 = iota // null, or Blank
+	refRaw               // JSON bytes: buf[start:end]
+	refNode              // a value being changed: nodes[start]
 )
 
-// A ref is an output value, or a piece of one.
+// A ref is an output value, or a piece of one: a whole value, the elements
+// of an array, or the escaped content of a string.
 type ref struct {
-	kind       uint8
-	buf        uint8
-	start, end int32
+	kind, buf  uint8
+	start, end int
+}
+
+// docRef returns the ref for a value in the document. ApplyPatch treats a
+// nil source like Blank, so null is refNull.
+func (p *RawPatcher) docRef(v span) ref {
+	if p.doc[v.start] == 'n' {
+		return ref{}
+	}
+	return ref{kind: refRaw, buf: bufDoc, start: v.start, end: v.end}
 }
 
 // A key is a JSON string, quotes included.
 type key struct {
 	buf        uint8
-	esc        bool
-	start, end int32
+	esc        bool // has escapes
+	start, end int
 	pre        uint64 // the first 8 bytes of its decoded content, big-endian
 }
 
-// A field is an object member of a document or patch value.
-type field struct {
-	key         key
-	start, end  int32 // the value
-	kids, nkids int32 // the value's kids, or -1
-}
+// emptyKey is the key of the root and of array elements, as in ApplyPatch.
+var emptyKey = key{buf: bufScratch, start: 0, end: 2}
 
-// An elem is an array element in the document.
-type elem struct {
-	start, end  int32
-	kids, nkids int32 // its kids, or -1
+// A member is a value directly inside an object or array: an object's
+// field, with its key, or an array's element.
+type member struct {
+	key  key
+	val  span // in the container's buffer
+	kids span // val's kids in p.kids, if recorded
 }
 
 // A kid is a string or container directly inside a document container that
@@ -125,8 +202,17 @@ type elem struct {
 // instead of scanning it again. Numbers and literals are not recorded;
 // indexing scans the gaps between kids for them.
 type kid struct {
-	start, end int32
-	esc        bool // strings: has escapes
+	span
+	esc bool // strings: has escapes
+}
+
+// An input is an entry on the input stack: a value in the document.
+type input struct {
+	val     span
+	key     key  // the key it was pushed from
+	kids    span // val's kids, if recorded
+	members span // val's members, once indexed
+	indexed bool
 }
 
 // Slots of a node.
@@ -140,698 +226,464 @@ const (
 // outputEntry: a source plus writable object, array and string slots, of
 // which the result is the first set in that order, else the source. A
 // patch from the differ only ever uses one slot.
-//
-// The node's items form a list, each tagged with its slot: the object's are
-// fields set or deleted on top of base, the array's are its elements, the
-// string's are its pieces.
 type node struct {
-	src         ref   // refNull once the array or string slot took it
-	hasObject   bool  // the object slot is set
-	hasArray    bool  // the array slot is set, as a non-nil slice
-	base        ref   // the object slot starts from this object, or refNull
-	fields      int32 // base's fields in p.fields, or -1
-	nfields     int32
-	first, last int32
+	src     ref  // the array and string slots take it over
+	object  bool // the object slot is set; it starts from src, if any
+	array   bool // the array slot is set, as a non-nil slice
+	members span // src's members, once indexed
+	indexed bool
+	first   int // items, linked through item.next; -1 if none
+	last    int
 }
 
+// An item is a slot's content: a field set or deleted on the object, an
+// element of the array, or a piece of the string.
 type item struct {
-	key  key
 	slot uint8
 	del  bool
+	key  key
 	val  ref
-	next int32
-}
-
-// An input is an entry on the input stack: a value in the document.
-type input struct {
-	start, end int32
-	key        key   // the key it was pushed from; empty for elements and the root
-	kids       int32 // in p.kids, or -1 if not recorded
-	nkids      int32
-	fields     int32 // in p.fields, or -1 until indexed
-	nfields    int32
-	elems      int32 // in p.elems, or -1 until indexed
-	nelems     int32
-}
-
-// Apply appends to dst the result of applying patch to doc. dst must not
-// overlap doc or patch.
-func (p *RawPatcher) Apply(dst, doc, patch []byte) ([]byte, error) {
-	if len(doc) > math.MaxInt32 || len(patch) > math.MaxInt32 {
-		return dst, errTooLarge
-	}
-	p.reset(doc, patch)
-	defer p.release()
-
-	start := skipWS(doc, 0)
-	end := trimEnd(doc, start, len(doc))
-	if start == end {
-		return dst, ErrInvalidJSON
-	}
-	switch doc[start] {
-	case '{', '[':
-		// Don't scan the whole document only to find where it ends: the
-		// patch scans what it needs. Check the brackets match.
-		if end-start < 2 || doc[end-1] != doc[start]+2 {
-			return dst, ErrInvalidJSON
-		}
-	default:
-		if skipValue(doc, start) != end {
-			return dst, ErrInvalidJSON
-		}
-	}
-	p.in = append(p.in, input{start: int32(start), end: int32(end), key: emptyKey, kids: -1, fields: -1, elems: -1})
-	root := ref{kind: refSpan, buf: bufDoc, start: int32(start), end: int32(end)}
-	if doc[start] == 'n' {
-		root = ref{} // null: ApplyPatch treats a nil source like Blank.
-	}
-	p.out = append(p.out, root)
-
-	if err := p.run(); err != nil {
-		return dst, err
-	}
-	if len(p.out) == 0 {
-		return dst, ErrInvalidPatch
-	}
-	return p.emit(dst, p.out[len(p.out)-1])
-}
-
-func (p *RawPatcher) reset(doc, patch []byte) {
-	p.doc, p.patch = doc, patch
-	p.scratch = p.scratch[:0]
-	p.pos = 0
-	p.in = p.in[:0]
-	p.out = p.out[:0]
-	p.nodes = p.nodes[:0]
-	p.items = p.items[:0]
-	p.fields = p.fields[:0]
-	p.elems = p.elems[:0]
-	p.kids = p.kids[:0]
-	p.idx = p.idx[:0]
-}
-
-// release drops the caller's slices so a pooled RawPatcher doesn't keep
-// them alive.
-func (p *RawPatcher) release() {
-	p.doc, p.patch = nil, nil
-}
-
-func (p *RawPatcher) bytesOf(buf uint8) []byte {
-	switch buf {
-	case bufDoc:
-		return p.doc
-	case bufPatch:
-		return p.patch
-	case bufScratch:
-		return p.scratch
-	default:
-		return constBuf
-	}
+	next int
 }
 
 // Reading the patch.
 
 // run executes the patch: a flat JSON array of opcodes and their params,
 // read and executed one op at a time.
-func (p *RawPatcher) run() error {
+func (p *RawPatcher) run() {
 	b := p.patch
 	i := skipWS(b, 0)
 	if i >= len(b) || b[i] != '[' {
-		return ErrInvalidJSON
+		p.fail(ErrInvalidJSON)
+		return
 	}
-	i = skipWS(b, i+1)
-	if i < len(b) && b[i] == ']' {
-		p.pos = i + 1
-		return p.end()
+	p.pos = skipWS(b, i+1)
+	for p.pos >= len(b) || b[p.pos] != ']' {
+		p.exec(p.readUint())
+		if p.err != nil {
+			return
+		}
+		if p.pos = skipWS(b, p.pos); p.pos < len(b) && b[p.pos] == ']' {
+			break
+		}
+		p.comma()
 	}
-	p.pos = i
-	for {
-		code, err := p.readUint()
-		if err != nil {
-			return err
-		}
-		if err := p.exec(code); err != nil {
-			return err
-		}
-		i := skipWS(b, p.pos)
-		if i >= len(b) {
-			return ErrInvalidJSON
-		}
-		if b[i] == ']' {
-			p.pos = i + 1
-			return p.end()
-		}
-		if b[i] != ',' {
-			return ErrInvalidJSON
-		}
-		p.pos = skipWS(b, i+1)
+	if skipWS(b, p.pos+1) != len(b) {
+		p.fail(ErrInvalidJSON)
 	}
 }
 
-func (p *RawPatcher) end() error {
-	if skipWS(p.patch, p.pos) != len(p.patch) {
-		return ErrInvalidJSON
-	}
-	return nil
-}
-
-// param moves to the next param: past whitespace and one comma.
-func (p *RawPatcher) param() error {
+// comma moves past the comma before the next value in the patch.
+func (p *RawPatcher) comma() {
 	b := p.patch
 	i := skipWS(b, p.pos)
 	if i >= len(b) || b[i] != ',' {
-		return ErrInvalidJSON
+		p.fail(ErrInvalidJSON)
+		return
 	}
 	p.pos = skipWS(b, i+1)
-	return nil
 }
 
-func (p *RawPatcher) readUint() (int, error) {
+func (p *RawPatcher) readUint() int {
 	b := p.patch
-	i := p.pos
-	n := 0
-	for i < len(b) && '0' <= b[i] && b[i] <= '9' {
+	i, n := p.pos, 0
+	for i < len(b) && '0' <= b[i] && b[i] <= '9' && n <= math.MaxInt32 {
 		n = n*10 + int(b[i]-'0')
-		if n > math.MaxInt32 {
-			return 0, ErrInvalidPatch
-		}
 		i++
 	}
-	if i == p.pos || (i < len(b) && !scalarEnd[b[i]]) {
+	if i == p.pos || i < len(b) && !scalarEnd[b[i]] {
 		return p.readUintSlow()
 	}
 	p.pos = i
-	return n, nil
+	return n
 }
 
 // readUintSlow accepts integers written as floats, such as 1.0 or 1e2, as
 // ReadUintFromValueReader does.
-func (p *RawPatcher) readUintSlow() (int, error) {
+func (p *RawPatcher) readUintSlow() int {
 	e := skipValue(p.patch, p.pos)
 	if e < 0 {
-		return 0, ErrInvalidJSON
+		p.fail(ErrInvalidJSON)
+		return 0
 	}
 	f, err := strconv.ParseFloat(string(p.patch[p.pos:e]), 64)
 	if err != nil || f < 0 || f > math.MaxInt32 || f != math.Trunc(f) {
-		return 0, ErrInvalidPatch
+		p.fail(ErrInvalidPatch)
+		return 0
 	}
 	p.pos = e
-	return int(f), nil
+	return int(f)
 }
 
-func (p *RawPatcher) paramUint() (int, error) {
-	if err := p.param(); err != nil {
-		return 0, err
-	}
+func (p *RawPatcher) paramUint() int {
+	p.comma()
 	return p.readUint()
 }
 
-func (p *RawPatcher) paramString() (key, error) {
-	if err := p.param(); err != nil {
-		return key{}, err
-	}
+func (p *RawPatcher) paramKey() key {
+	p.comma()
 	b := p.patch
 	if p.pos >= len(b) || b[p.pos] != '"' {
-		return key{}, ErrInvalidPatch
+		p.fail(ErrInvalidPatch)
+		return emptyKey
 	}
 	e, esc := skipString(b, p.pos)
 	if e < 0 {
-		return key{}, ErrInvalidJSON
+		p.fail(ErrInvalidJSON)
+		return emptyKey
 	}
 	k := p.newKey(bufPatch, esc, p.pos, e)
 	p.pos = e
-	return k, nil
+	return k
 }
 
-func (p *RawPatcher) paramValue() (ref, error) {
-	if err := p.param(); err != nil {
-		return ref{}, err
-	}
+func (p *RawPatcher) paramValue() ref {
+	p.comma()
 	e := skipValue(p.patch, p.pos)
 	if e < 0 {
-		return ref{}, ErrInvalidJSON
+		p.fail(ErrInvalidJSON)
+		return ref{}
 	}
-	r := ref{kind: refSpan, buf: bufPatch, start: int32(p.pos), end: int32(e)}
+	r := ref{kind: refRaw, buf: bufPatch, start: p.pos, end: e}
 	if p.patch[p.pos] == 'n' {
-		r = ref{} // null behaves like Blank, as a nil source does in ApplyPatch.
+		r = ref{} // null behaves like Blank, as a nil source does in ApplyPatch
 	}
 	p.pos = e
-	return r, nil
+	return r
 }
 
 // Executing ops.
 
-func (p *RawPatcher) exec(code int) error {
-	switch code {
-	case int(codeValue):
-		v, err := p.paramValue()
-		if err != nil {
-			return err
-		}
-		p.out = append(p.out, v)
-		return nil
-	case int(codeCopy):
-		return p.opCopy()
-	case int(codeBlank):
-		p.out = append(p.out, ref{})
-		return nil
-	case int(codeReturnIntoArray):
-		return p.opReturnIntoArray()
-	case int(codeReturnIntoObject):
-		k, err := p.paramString()
-		if err != nil {
-			return err
-		}
-		return p.opReturnIntoObject(k)
-	case int(codeReturnIntoObjectSameKey):
-		return p.opReturnIntoObjectSameKey()
-	case int(codePushField):
-		n, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		return p.opPushField(n)
-	case int(codePushElement):
-		n, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		return p.opPushElement(n)
-	case int(codePushParent):
-		n, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		return p.opPushParent(n)
-	case int(codePop):
-		return p.opPop()
-	case int(codePushFieldCopy):
-		n, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		if err := p.opPushField(n); err != nil {
-			return err
-		}
-		return p.opCopy()
-	case int(codePushFieldBlank):
-		n, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		if err := p.opPushField(n); err != nil {
-			return err
-		}
-		p.out = append(p.out, ref{})
-		return nil
-	case int(codePushElementCopy):
-		n, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		if err := p.opPushElement(n); err != nil {
-			return err
-		}
-		return p.opCopy()
-	case int(codePushElementBlank):
-		n, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		if err := p.opPushElement(n); err != nil {
-			return err
-		}
-		p.out = append(p.out, ref{})
-		return nil
-	case int(codeReturnIntoObjectPop):
-		k, err := p.paramString()
-		if err != nil {
-			return err
-		}
-		if err := p.opReturnIntoObject(k); err != nil {
-			return err
-		}
-		return p.opPop()
-	case int(codeReturnIntoObjectSameKeyPop):
-		if err := p.opReturnIntoObjectSameKey(); err != nil {
-			return err
-		}
-		return p.opPop()
-	case int(codeReturnIntoArrayPop):
-		if err := p.opReturnIntoArray(); err != nil {
-			return err
-		}
-		return p.opPop()
-	case int(codeObjectSetFieldValue):
-		v, err := p.paramValue()
-		if err != nil {
-			return err
-		}
-		k, err := p.paramString()
-		if err != nil {
-			return err
-		}
-		p.out = append(p.out, v)
-		return p.opReturnIntoObject(k)
-	case int(codeObjectCopyField):
-		n, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		if err := p.opPushField(n); err != nil {
-			return err
-		}
-		if err := p.opCopy(); err != nil {
-			return err
-		}
-		if err := p.opReturnIntoObjectSameKey(); err != nil {
-			return err
-		}
-		return p.opPop()
-	case int(codeObjectDeleteField):
-		n, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		return p.opObjectDeleteField(n)
-	case int(codeArrayAppendValue):
-		v, err := p.paramValue()
-		if err != nil {
-			return err
-		}
-		return p.opArrayAppend(v)
-	case int(codeArrayAppendSlice):
-		l, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		r, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		return p.opArrayAppendSlice(l, r)
-	case int(codeStringAppendString):
-		k, err := p.paramString()
-		if err != nil {
-			return err
-		}
-		return p.appendChars(ref{kind: refChars, buf: bufPatch, start: k.start + 1, end: k.end - 1})
-	case int(codeStringAppendSlice):
-		l, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		r, err := p.paramUint()
-		if err != nil {
-			return err
-		}
-		return p.opStringAppendSlice(l, r)
+// exec executes one op, reading its params. Ops record a failure in p.err
+// and carry on; run stops after the op, and the result is discarded.
+func (p *RawPatcher) exec(op int) {
+	if op > math.MaxUint8 {
+		p.fail(ErrInvalidPatch)
+		return
+	}
+	switch uint8(op) {
+	case codeValue:
+		p.push(p.paramValue())
+	case codeCopy:
+		p.copyInput()
+	case codeBlank:
+		p.push(ref{})
+	case codeReturnIntoArray:
+		p.appendElement(p.pop())
+	case codeReturnIntoObject:
+		p.returnIntoObject(p.paramKey())
+	case codeReturnIntoObjectSameKey:
+		p.returnIntoObject(p.inputKey())
+	case codePushField:
+		p.pushField(p.paramUint())
+	case codePushElement:
+		p.pushElement(p.paramUint())
+	case codePushParent:
+		p.pushParent(p.paramUint())
+	case codePop:
+		p.popInput()
+	case codePushFieldCopy:
+		p.pushField(p.paramUint())
+		p.copyInput()
+	case codePushFieldBlank:
+		p.pushField(p.paramUint())
+		p.push(ref{})
+	case codePushElementCopy:
+		p.pushElement(p.paramUint())
+		p.copyInput()
+	case codePushElementBlank:
+		p.pushElement(p.paramUint())
+		p.push(ref{})
+	case codeReturnIntoObjectPop:
+		p.returnIntoObject(p.paramKey())
+		p.popInput()
+	case codeReturnIntoObjectSameKeyPop:
+		p.returnIntoObject(p.inputKey())
+		p.popInput()
+	case codeReturnIntoArrayPop:
+		p.appendElement(p.pop())
+		p.popInput()
+	case codeObjectSetFieldValue:
+		p.push(p.paramValue())
+		p.returnIntoObject(p.paramKey())
+	case codeObjectCopyField:
+		p.pushField(p.paramUint())
+		p.copyInput()
+		p.returnIntoObject(p.inputKey())
+		p.popInput()
+	case codeObjectDeleteField:
+		p.deleteField(p.paramUint())
+	case codeArrayAppendValue:
+		p.appendElement(p.paramValue())
+	case codeArrayAppendSlice:
+		l := p.paramUint()
+		p.appendSlice(l, p.paramUint())
+	case codeStringAppendString:
+		k := p.paramKey()
+		p.appendChars(ref{kind: refRaw, buf: bufPatch, start: k.start + 1, end: k.end - 1})
+	case codeStringAppendSlice:
+		l := p.paramUint()
+		p.appendSubstring(l, p.paramUint())
 	default:
-		return ErrInvalidPatch
+		p.fail(ErrInvalidPatch)
 	}
 }
 
-func (p *RawPatcher) opCopy() error {
+// The input stack.
+
+// input returns the input value, or nil if the stack is empty.
+func (p *RawPatcher) input() *input {
 	if len(p.in) == 0 {
-		return ErrInvalidPatch
+		p.fail(ErrInvalidPatch)
+		return nil
 	}
-	in := &p.in[len(p.in)-1]
-	r := ref{kind: refSpan, buf: bufDoc, start: in.start, end: in.end}
-	if p.doc[in.start] == 'n' {
-		r = ref{}
-	}
-	p.out = append(p.out, r)
-	return nil
+	return &p.in[len(p.in)-1]
 }
 
-func (p *RawPatcher) opPushField(n int) error {
-	if len(p.in) == 0 {
-		return ErrInvalidPatch
+func (p *RawPatcher) inputKey() key {
+	if in := p.input(); in != nil {
+		return in.key
 	}
-	f, err := p.inputField(n)
-	if err != nil {
-		return err
-	}
-	p.in = append(p.in, input{start: f.start, end: f.end, key: f.key, kids: f.kids, nkids: f.nkids, fields: -1, elems: -1})
-	return nil
+	return emptyKey
 }
 
-func (p *RawPatcher) opPushElement(n int) error {
-	if len(p.in) == 0 {
-		return ErrInvalidPatch
+func (p *RawPatcher) pushField(n int) {
+	if m, ok := p.inputMember(n, '{'); ok {
+		p.in = append(p.in, input{val: m.val, key: m.key, kids: m.kids})
 	}
-	first, count, err := p.inputElems()
-	if err != nil {
-		return err
-	}
-	if n >= int(count) {
-		return ErrInvalidPatch
-	}
-	e := p.elems[int(first)+n]
-	p.in = append(p.in, input{start: e.start, end: e.end, key: emptyKey, kids: e.kids, nkids: e.nkids, fields: -1, elems: -1})
-	return nil
 }
 
-func (p *RawPatcher) opPushParent(n int) error {
+func (p *RawPatcher) pushElement(n int) {
+	if m, ok := p.inputMember(n, '['); ok {
+		p.in = append(p.in, input{val: m.val, key: emptyKey, kids: m.kids})
+	}
+}
+
+func (p *RawPatcher) pushParent(n int) {
 	i := len(p.in) - 2 - n
 	if i < 0 {
-		return ErrInvalidPatch
+		p.fail(ErrInvalidPatch)
+		return
 	}
 	p.in = append(p.in, p.in[i])
-	return nil
 }
 
-func (p *RawPatcher) opPop() error {
-	if len(p.in) == 0 {
-		return ErrInvalidPatch
+func (p *RawPatcher) popInput() {
+	if p.input() != nil {
+		p.in = p.in[:len(p.in)-1]
 	}
-	p.in = p.in[:len(p.in)-1]
-	return nil
 }
 
-// pop removes the output value, which must not be the last one.
-func (p *RawPatcher) pop() (ref, error) {
+// inputMember returns member n of the input value, an object if open is
+// '{', an array if '['. An object's members are in key order.
+func (p *RawPatcher) inputMember(n int, open byte) (member, bool) {
+	ms, ok := p.inputMembers(open)
+	if !ok || n >= ms.end-ms.start {
+		p.fail(ErrInvalidPatch)
+		return member{}, false
+	}
+	return p.members[ms.start+n], true
+}
+
+func (p *RawPatcher) inputMembers(open byte) (span, bool) {
+	in := p.input()
+	if in == nil {
+		return span{}, false
+	}
+	if p.doc[in.val.start] != open {
+		p.fail(ErrInvalidPatch)
+		return span{}, false
+	}
+	if !in.indexed {
+		in.members, in.indexed = p.index(bufDoc, in.val, in.kids), true
+	}
+	return in.members, p.err == nil
+}
+
+// The output stack.
+
+func (p *RawPatcher) push(r ref) {
+	p.out = append(p.out, r)
+}
+
+// pop removes and returns the output value. The root can't be popped.
+func (p *RawPatcher) pop() ref {
 	if len(p.out) < 2 {
-		return ref{}, ErrInvalidPatch
+		p.fail(ErrInvalidPatch)
+		return ref{}
 	}
 	r := p.out[len(p.out)-1]
 	p.out = p.out[:len(p.out)-1]
-	return r, nil
+	return r
 }
 
-func (p *RawPatcher) opReturnIntoObject(k key) error {
-	v, err := p.pop()
-	if err != nil {
-		return err
+func (p *RawPatcher) copyInput() {
+	if in := p.input(); in != nil {
+		p.push(p.docRef(in.val))
 	}
-	n, err := p.outputObject()
-	if err != nil {
-		return err
-	}
-	p.addItem(n, item{key: k, slot: slotObject, val: v})
-	return nil
 }
 
-func (p *RawPatcher) opReturnIntoObjectSameKey() error {
-	if len(p.in) == 0 {
-		return ErrInvalidPatch
+func (p *RawPatcher) returnIntoObject(k key) {
+	v := p.pop()
+	if n := p.outputObject(); n >= 0 {
+		p.addItem(n, item{slot: slotObject, key: k, val: v})
 	}
-	return p.opReturnIntoObject(p.in[len(p.in)-1].key)
 }
 
-func (p *RawPatcher) opReturnIntoArray() error {
-	v, err := p.pop()
-	if err != nil {
-		return err
+func (p *RawPatcher) deleteField(i int) {
+	m, ok := p.inputMember(i, '{')
+	if !ok {
+		return
 	}
-	return p.opArrayAppend(v)
+	if n := p.outputObject(); n >= 0 {
+		p.addItem(n, item{slot: slotObject, key: m.key, del: true})
+	}
 }
 
-func (p *RawPatcher) opArrayAppend(v ref) error {
-	n, err := p.outputArray()
-	if err != nil {
-		return err
+func (p *RawPatcher) appendElement(v ref) {
+	if n := p.outputArray(); n >= 0 {
+		p.nodes[n].array = true
+		p.addItem(n, item{slot: slotArray, val: v})
 	}
-	p.nodes[n].hasArray = true
-	p.addItem(n, item{slot: slotArray, val: v})
-	return nil
 }
 
-func (p *RawPatcher) opObjectDeleteField(n int) error {
-	if len(p.in) == 0 {
-		return ErrInvalidPatch
+// appendSlice appends elements [l, r) of the input array as one piece: the
+// bytes from the first to the last, commas included.
+func (p *RawPatcher) appendSlice(l, r int) {
+	ms, ok := p.inputMembers('[')
+	if !ok {
+		return
 	}
-	f, err := p.inputField(n)
-	if err != nil {
-		return err
+	if l > r || r > ms.end-ms.start {
+		p.fail(ErrInvalidPatch)
+		return
 	}
-	o, err := p.outputObject()
-	if err != nil {
-		return err
+	n := p.outputArray()
+	if n < 0 || l == r {
+		return
 	}
-	p.addItem(o, item{key: f.key, slot: slotObject, del: true})
-	return nil
+	p.nodes[n].array = true
+	first, last := p.members[ms.start+l].val, p.members[ms.start+r-1].val
+	p.addItem(n, item{slot: slotArray, val: ref{kind: refRaw, buf: bufDoc, start: first.start, end: last.end}})
 }
 
-func (p *RawPatcher) opArrayAppendSlice(l, r int) error {
-	if len(p.in) == 0 {
-		return ErrInvalidPatch
+// appendSubstring appends bytes [l, r) of the input string. The offsets are
+// into the decoded string, which is the content itself unless it has
+// escapes.
+func (p *RawPatcher) appendSubstring(l, r int) {
+	in := p.input()
+	if in == nil {
+		return
 	}
-	first, count, err := p.inputElems()
-	if err != nil {
-		return err
+	if p.doc[in.val.start] != '"' {
+		p.fail(ErrInvalidPatch)
+		return
 	}
-	if l > r || r > int(count) {
-		return ErrInvalidPatch
-	}
-	n, err := p.outputArray()
-	if err != nil {
-		return err
-	}
-	if l == r {
-		return nil
-	}
-	start := p.elems[int(first)+l].start
-	end := p.elems[int(first)+r-1].end
-	p.nodes[n].hasArray = true
-	p.addItem(n, item{slot: slotArray, val: ref{kind: refElems, buf: bufDoc, start: start, end: end}})
-	return nil
-}
-
-func (p *RawPatcher) opStringAppendSlice(l, r int) error {
-	if len(p.in) == 0 {
-		return ErrInvalidPatch
-	}
-	in := &p.in[len(p.in)-1]
-	if p.doc[in.start] != '"' {
-		return ErrInvalidPatch
-	}
-	start, end := int(in.start)+1, int(in.end)-1
-	raw := p.doc[start:end]
-	if bytes.IndexByte(raw, '\\') < 0 {
-		// Unescaped content is its own decoding, so slice it in place.
-		if l > r || r > len(raw) {
-			return ErrInvalidPatch
+	start, end := in.val.start+1, in.val.end-1
+	content := p.doc[start:end]
+	if bytes.IndexByte(content, '\\') < 0 {
+		if l > r || r > len(content) {
+			p.fail(ErrInvalidPatch)
+			return
 		}
-		return p.appendChars(ref{kind: refChars, buf: bufDoc, start: int32(start + l), end: int32(start + r)})
+		p.appendChars(ref{kind: refRaw, buf: bufDoc, start: start + l, end: start + r})
+		return
 	}
-	// Offsets are into the decoded string: decode, slice, escape again.
-	p.str = unescape(p.str[:0], raw)
+	p.str = unescape(p.str[:0], content)
 	if l > r || r > len(p.str) {
-		return ErrInvalidPatch
+		p.fail(ErrInvalidPatch)
+		return
 	}
 	s := len(p.scratch)
 	p.scratch = escape(p.scratch, p.str[l:r])
-	if len(p.scratch) > math.MaxInt32 {
-		return errTooLarge
-	}
-	return p.appendChars(ref{kind: refChars, buf: bufScratch, start: int32(s), end: int32(len(p.scratch))})
+	p.appendChars(ref{kind: refRaw, buf: bufScratch, start: s, end: len(p.scratch)})
 }
 
-func (p *RawPatcher) appendChars(c ref) error {
-	n, err := p.outputString()
-	if err != nil {
-		return err
-	}
-	if c.end > c.start {
+func (p *RawPatcher) appendChars(c ref) {
+	if n := p.outputString(); n >= 0 && c.end > c.start {
 		p.addItem(n, item{slot: slotString, val: c})
 	}
-	return nil
 }
 
 // outputNode makes the output value a node, if it is not one already, and
 // returns its index.
-func (p *RawPatcher) outputNode() int32 {
+func (p *RawPatcher) outputNode() int {
 	t := &p.out[len(p.out)-1]
 	if t.kind == refNode {
 		return t.start
 	}
-	idx := int32(len(p.nodes))
-	p.nodes = append(p.nodes, node{src: *t, fields: -1, first: -1, last: -1})
-	*t = ref{kind: refNode, start: idx}
-	return idx
+	i := len(p.nodes)
+	p.nodes = append(p.nodes, node{src: *t, first: -1, last: -1})
+	*t = ref{kind: refNode, start: i}
+	return i
 }
 
-// srcByte returns the first byte of the node's source, or 0 if it has none.
-func (p *RawPatcher) srcByte(n *node) byte {
-	if n.src.kind != refSpan {
+// srcType returns the first byte of the node's source, or 0 if it has none.
+func (p *RawPatcher) srcType(n *node) byte {
+	if n.src.kind != refRaw {
 		return 0
 	}
 	return p.bytesOf(n.src.buf)[n.src.start]
 }
 
-// outputObject sets the output value's object slot, as
-// patcher.outputObject: from the source, which must then be an object, or
-// empty. The source stays.
-func (p *RawPatcher) outputObject() (int32, error) {
-	idx := p.outputNode()
-	n := &p.nodes[idx]
-	if n.hasObject {
-		return idx, nil
+// outputObject sets the output value's object slot and returns its node,
+// or -1, as patcher.outputObject: the source, if any, must be an object,
+// and stays.
+func (p *RawPatcher) outputObject() int {
+	i := p.outputNode()
+	n := &p.nodes[i]
+	if n.object {
+		return i
 	}
-	switch p.srcByte(n) {
-	case 0:
-	case '{':
-		n.base = n.src
-		// The source is often the input value, already indexed.
-		if len(p.in) > 0 && n.src.buf == bufDoc {
-			if in := &p.in[len(p.in)-1]; in.start == n.src.start && in.fields >= 0 {
-				n.fields, n.nfields = in.fields, in.nfields
-			}
+	if t := p.srcType(n); t != 0 && t != '{' {
+		p.fail(ErrInvalidPatch)
+		return -1
+	}
+	n.object = true
+	// The source is often the input value, already indexed.
+	if n.src.kind == refRaw && n.src.buf == bufDoc && len(p.in) > 0 {
+		if in := &p.in[len(p.in)-1]; in.indexed && in.val.start == n.src.start {
+			n.members, n.indexed = in.members, true
 		}
-	default:
-		return 0, ErrInvalidPatch
 	}
-	n.hasObject = true
-	return idx, nil
+	return i
 }
 
-// outputArray prepares the array slot, as patcher.outputArray: a source,
-// which must be an array, moves into it.
-func (p *RawPatcher) outputArray() (int32, error) {
-	idx := p.outputNode()
-	n := &p.nodes[idx]
-	switch p.srcByte(n) {
+func (p *RawPatcher) outputArray() int  { return p.takeSource('[', slotArray) }
+func (p *RawPatcher) outputString() int { return p.takeSource('"', slotString) }
+
+// takeSource prepares the output value's array or string slot and returns
+// its node, or -1, as patcher.outputArray and outputString: the source, if
+// any, must be of that type, and its content becomes the slot's first item.
+func (p *RawPatcher) takeSource(open byte, slot uint8) int {
+	i := p.outputNode()
+	n := &p.nodes[i]
+	switch p.srcType(n) {
 	case 0:
-		return idx, nil
-	case '[':
+		return i
+	case open:
 	default:
-		return 0, ErrInvalidPatch
+		p.fail(ErrInvalidPatch)
+		return -1
 	}
 	src := n.src
 	n.src = ref{}
-	n.hasArray = true
 	b := p.bytesOf(src.buf)
-	s := skipWS(b, int(src.start)+1)
-	if e := trimEnd(b, s, int(src.end)-1); e > s {
-		p.addItem(idx, item{slot: slotArray, val: ref{kind: refElems, buf: src.buf, start: int32(s), end: int32(e)}})
+	s, e := src.start+1, src.end-1 // inside the brackets or quotes
+	if slot == slotArray {
+		n.array = true
+		s = skipWS(b, s)
+		e = trimEnd(b, s, e)
 	}
-	return idx, nil
+	if e > s {
+		p.addItem(i, item{slot: slot, val: ref{kind: refRaw, buf: src.buf, start: s, end: e}})
+	}
+	return i
 }
 
-// outputString prepares the string slot, as patcher.outputString: a
-// source, which must be a string, moves into it.
-func (p *RawPatcher) outputString() (int32, error) {
-	idx := p.outputNode()
-	n := &p.nodes[idx]
-	switch p.srcByte(n) {
-	case 0:
-		return idx, nil
-	case '"':
-	default:
-		return 0, ErrInvalidPatch
-	}
-	src := n.src
-	n.src = ref{}
-	if src.end-src.start > 2 {
-		p.addItem(idx, item{slot: slotString, val: ref{kind: refChars, buf: src.buf, start: src.start + 1, end: src.end - 1}})
-	}
-	return idx, nil
-}
-
-func (p *RawPatcher) addItem(n int32, it item) {
+func (p *RawPatcher) addItem(n int, it item) {
 	it.next = -1
-	i := int32(len(p.items))
+	i := len(p.items)
 	p.items = append(p.items, it)
 	nd := &p.nodes[n]
 	if nd.last < 0 {
@@ -842,162 +694,110 @@ func (p *RawPatcher) addItem(n int32, it item) {
 	nd.last = i
 }
 
-// Indexing the document.
+// Indexing.
 
-// inputField returns field n, in key order, of the input value.
-func (p *RawPatcher) inputField(n int) (field, error) {
-	in := &p.in[len(p.in)-1]
-	if in.fields < 0 {
-		if p.doc[in.start] != '{' {
-			return field{}, ErrInvalidPatch
-		}
-		first, count, err := p.indexObject(bufDoc, in.start, in.end, in.kids, in.nkids)
-		if err != nil {
-			return field{}, err
-		}
-		in = &p.in[len(p.in)-1]
-		in.fields, in.nfields = first, count
-	}
-	if n >= int(in.nfields) {
-		return field{}, ErrInvalidPatch
-	}
-	return p.fields[int(in.fields)+n], nil
-}
-
-// inputElems returns the elements of the input value, indexing it if needed.
-func (p *RawPatcher) inputElems() (int32, int32, error) {
-	in := &p.in[len(p.in)-1]
-	if in.elems >= 0 {
-		return in.elems, in.nelems, nil
-	}
-	b := p.doc
-	if b[in.start] != '[' {
-		return 0, 0, ErrInvalidPatch
-	}
-	first := int32(len(p.elems))
-	i := skipWS(b, int(in.start)+1)
-	end := int(in.end)
-	if i < end && b[i] == ']' {
-		in.elems, in.nelems = first, 0
-		return first, 0, nil
-	}
-	c := cursor{k: in.kids, end: in.kids + in.nkids}
-	for {
-		e, _, kids, nkids := p.child(b, i, &c, true)
-		if e < 0 || e > end {
-			return 0, 0, ErrInvalidJSON
-		}
-		p.elems = append(p.elems, elem{start: int32(i), end: int32(e), kids: kids, nkids: nkids})
-		i = skipWS(b, e)
-		if i >= end {
-			return 0, 0, ErrInvalidJSON
-		}
-		if b[i] == ']' {
-			break
-		}
-		if b[i] != ',' {
-			return 0, 0, ErrInvalidJSON
-		}
-		i = skipWS(b, i+1)
-	}
-	in.elems, in.nelems = first, int32(len(p.elems))-first
-	return in.elems, in.nelems, nil
-}
-
-// indexObject appends the fields of the object at buf[start:end] to
-// p.fields, sorted by key with the last of any duplicates kept, which is the
-// order and content ApplyPatch sees in a decoded map.
-func (p *RawPatcher) indexObject(buf uint8, start, end, kids, nkids int32) (int32, int32, error) {
+// index appends the members of the object or array at buf[v] to p.members
+// and returns their span. An object's are sorted by key, keeping the last
+// of any duplicates: the order and content ApplyPatch sees in a decoded
+// map. kids are v's kids, if recorded.
+func (p *RawPatcher) index(buf uint8, v span, kids span) span {
 	b := p.bytesOf(buf)
-	first := len(p.fields)
-	i := skipWS(b, int(start)+1)
-	e := int(end)
-	if i < e && b[i] == '}' {
-		return int32(first), 0, nil
-	}
-	c := cursor{k: kids, end: kids + nkids}
+	first := len(p.members)
+	object := b[v.start] == '{'
+	closer := b[v.start] + 2 // '}' or ']'
 	record := buf == bufDoc
 	sorted := true
+
+	i := skipWS(b, v.start+1)
+	if i < v.end && b[i] == closer {
+		return span{first, first}
+	}
 	for {
-		if i >= e || b[i] != '"' {
-			return 0, 0, ErrInvalidJSON
+		var m member
+		if object {
+			if i >= v.end || b[i] != '"' {
+				break
+			}
+			e, esc, _ := p.child(b, i, &kids, false)
+			if e < 0 {
+				break
+			}
+			m.key = p.newKey(buf, esc, i, e)
+			if i = skipWS(b, e); i >= v.end || b[i] != ':' {
+				break
+			}
+			i = skipWS(b, i+1)
 		}
-		ke, esc, _, _ := p.child(b, i, &c, false)
-		if ke < 0 {
-			return 0, 0, ErrInvalidJSON
-		}
-		k := p.newKey(buf, esc, i, ke)
-		i = skipWS(b, ke)
-		if i >= e || b[i] != ':' {
-			return 0, 0, ErrInvalidJSON
-		}
-		i = skipWS(b, i+1)
-		ve, _, vk, vn := p.child(b, i, &c, record)
-		if ve < 0 || ve > e {
-			return 0, 0, ErrInvalidJSON
-		}
-		if sorted && len(p.fields) > first && p.compareKeys(p.fields[len(p.fields)-1].key, k) >= 0 {
-			sorted = false
-		}
-		p.fields = append(p.fields, field{key: k, start: int32(i), end: int32(ve), kids: vk, nkids: vn})
-		i = skipWS(b, ve)
-		if i >= e {
-			return 0, 0, ErrInvalidJSON
-		}
-		if b[i] == '}' {
+		e, _, k := p.child(b, i, &kids, record)
+		if e < 0 || e > v.end {
 			break
 		}
-		if b[i] != ',' {
-			return 0, 0, ErrInvalidJSON
+		m.val, m.kids = span{i, e}, k
+		if object && sorted && len(p.members) > first && p.compareKeys(p.members[len(p.members)-1].key, m.key) >= 0 {
+			sorted = false
+		}
+		p.members = append(p.members, m)
+
+		if i = skipWS(b, e); i < v.end && b[i] == closer {
+			if !sorted {
+				p.sortMembers(first)
+			}
+			return span{first, len(p.members)}
+		}
+		if i >= v.end || b[i] != ',' {
+			break
 		}
 		i = skipWS(b, i+1)
 	}
-	if !sorted {
-		fs := p.fields[first:]
-		p.sortFields(fs)
-		w := 0
-		for j := range fs {
-			if j+1 < len(fs) && p.compareKeys(fs[j].key, fs[j+1].key) == 0 {
-				continue // a later duplicate wins
-			}
-			fs[w] = fs[j]
-			w++
-		}
-		p.fields = p.fields[:first+w]
-	}
-	return int32(first), int32(len(p.fields) - first), nil
+	p.fail(ErrInvalidJSON)
+	return span{first, first}
 }
 
-// A cursor walks the kids recorded for a container, in order.
-type cursor struct{ k, end int32 }
+// sortMembers sorts p.members[first:] stably by key, then drops all but the
+// last of each run of equal keys.
+func (p *RawPatcher) sortMembers(first int) {
+	ms := p.members[first:]
+	p.memberSort = memberSorter{p, ms}
+	sort.Stable(&p.memberSort)
+	p.memberSort = memberSorter{}
+	w := 0
+	for j := range ms {
+		if j+1 < len(ms) && p.compareKeys(ms[j].key, ms[j+1].key) == 0 {
+			continue
+		}
+		ms[w] = ms[j]
+		w++
+	}
+	p.members = p.members[:first+w]
+}
 
 // child returns the end of the value at b[i], whether it is a string with
-// escapes, and, if record is set and it is a container, its kids. A kid
-// recorded at i gives the end without scanning.
-func (p *RawPatcher) child(b []byte, i int, c *cursor, record bool) (int, bool, int32, int32) {
-	if c.k < c.end {
-		if k := p.kids[c.k]; int(k.start) == i {
-			c.k++
-			return int(k.end), k.esc, -1, 0
+// escapes, and, if record is set and it is a container, its kids. A kid at
+// the front of kids gives the end without scanning.
+func (p *RawPatcher) child(b []byte, i int, kids *span, record bool) (int, bool, span) {
+	if kids.start < kids.end {
+		if k := p.kids[kids.start]; k.start == i {
+			kids.start++
+			return k.end, k.esc, span{}
 		}
 	}
 	if i < len(b) {
 		switch b[i] {
 		case '"':
 			e, esc := skipString(b, i)
-			return e, esc, -1, 0
+			return e, esc, span{}
 		case '{', '[':
 			if record {
 				return p.skipRecord(b, i)
 			}
 		}
 	}
-	return skipValue(b, i), false, -1, 0
+	return skipValue(b, i), false, span{}
 }
 
 // skipRecord is skipContainer, recording the container's kids.
-func (p *RawPatcher) skipRecord(b []byte, i int) (int, bool, int32, int32) {
-	first := int32(len(p.kids))
+func (p *RawPatcher) skipRecord(b []byte, i int) (int, bool, span) {
+	first := len(p.kids)
 	depth, open := 0, 0
 	for i < len(b) {
 		c := b[i]
@@ -1009,30 +809,30 @@ func (p *RawPatcher) skipRecord(b []byte, i int) (int, bool, int32, int32) {
 		case '"':
 			e, esc := skipString(b, i)
 			if e < 0 {
-				return -1, false, -1, 0
+				return -1, false, span{}
 			}
 			if depth == 1 {
-				p.kids = append(p.kids, kid{start: int32(i), end: int32(e), esc: esc})
+				p.kids = append(p.kids, kid{span{i, e}, esc})
 			}
 			i = e
 			continue
 		case '{', '[':
-			depth++
-			if depth == 2 {
+			if depth++; depth == 2 {
 				open = i
 			}
 		default: // '}', ']'
-			depth--
-			if depth == 1 {
-				p.kids = append(p.kids, kid{start: int32(open), end: int32(i + 1)})
+			if depth--; depth == 1 {
+				p.kids = append(p.kids, kid{span: span{open, i + 1}})
 			} else if depth == 0 {
-				return i + 1, false, first, int32(len(p.kids)) - first
+				return i + 1, false, span{first, len(p.kids)}
 			}
 		}
 		i++
 	}
-	return -1, false, -1, 0
+	return -1, false, span{}
 }
+
+// Keys.
 
 // newKey returns the key for the JSON string at buf[start:end].
 func (p *RawPatcher) newKey(buf uint8, esc bool, start, end int) key {
@@ -1045,13 +845,13 @@ func (p *RawPatcher) newKey(buf uint8, esc bool, start, end int) key {
 	for i := 0; i < 8 && i < len(c); i++ {
 		pre |= uint64(c[i]) << (56 - 8*uint(i))
 	}
-	return key{buf: buf, esc: esc, start: int32(start), end: int32(end), pre: pre}
+	return key{buf: buf, esc: esc, start: start, end: end, pre: pre}
 }
 
 // compareKeys compares two keys by their decoded content. Their first 8
 // bytes, compared as one integer, decide nearly every comparison; only keys
 // that agree on them are compared in full, in compareKeysSlow. This keeps
-// compareKeys small enough to inline into the sorts.
+// compareKeys small enough to inline.
 func (p *RawPatcher) compareKeys(a, b key) int {
 	if a.pre != b.pre {
 		if a.pre < b.pre {
@@ -1076,200 +876,138 @@ func (p *RawPatcher) compareKeysSlow(a, b key) int {
 	return bytes.Compare(ab, bb)
 }
 
-// smallSort is the size up to which sortFields and sortItems use insertion
-// sort, calling compareKeys directly rather than through sort.Interface.
-// Most objects are smaller.
-const smallSort = 24
-
-// sortFields sorts fields stably by key.
-func (p *RawPatcher) sortFields(fs []field) {
-	if len(fs) > smallSort {
-		p.fieldSort.p, p.fieldSort.s = p, fs
-		sort.Stable(&p.fieldSort)
-		p.fieldSort.p, p.fieldSort.s = nil, nil
-		return
-	}
-	for i := 1; i < len(fs); i++ {
-		f := fs[i]
-		j := i
-		for ; j > 0 && p.compareKeys(f.key, fs[j-1].key) < 0; j-- {
-			fs[j] = fs[j-1]
-		}
-		fs[j] = f
-	}
-}
-
-// sortItems sorts item indices stably by their items' keys.
-func (p *RawPatcher) sortItems(ch []int32) {
-	if len(ch) > smallSort {
-		p.itemSort.p, p.itemSort.s = p, ch
-		sort.Stable(&p.itemSort)
-		p.itemSort.p, p.itemSort.s = nil, nil
-		return
-	}
-	for i := 1; i < len(ch); i++ {
-		c := ch[i]
-		k := p.items[c].key
-		j := i
-		for ; j > 0 && p.compareKeys(k, p.items[ch[j-1]].key) < 0; j-- {
-			ch[j] = ch[j-1]
-		}
-		ch[j] = c
-	}
-}
-
-type fieldSorter struct {
+type memberSorter struct {
 	p *RawPatcher
-	s []field
+	s []member
 }
 
-func (s *fieldSorter) Len() int           { return len(s.s) }
-func (s *fieldSorter) Less(i, j int) bool { return s.p.compareKeys(s.s[i].key, s.s[j].key) < 0 }
-func (s *fieldSorter) Swap(i, j int)      { s.s[i], s.s[j] = s.s[j], s.s[i] }
+func (s *memberSorter) Len() int           { return len(s.s) }
+func (s *memberSorter) Less(i, j int) bool { return s.p.compareKeys(s.s[i].key, s.s[j].key) < 0 }
+func (s *memberSorter) Swap(i, j int)      { s.s[i], s.s[j] = s.s[j], s.s[i] }
 
-type itemSorter struct {
+type changeSorter struct {
 	p *RawPatcher
-	s []int32
+	s []item
 }
 
-func (s *itemSorter) Len() int { return len(s.s) }
-func (s *itemSorter) Less(i, j int) bool {
-	return s.p.compareKeys(s.p.items[s.s[i]].key, s.p.items[s.s[j]].key) < 0
-}
-func (s *itemSorter) Swap(i, j int) { s.s[i], s.s[j] = s.s[j], s.s[i] }
+func (s *changeSorter) Len() int           { return len(s.s) }
+func (s *changeSorter) Less(i, j int) bool { return s.p.compareKeys(s.s[i].key, s.s[j].key) < 0 }
+func (s *changeSorter) Swap(i, j int)      { s.s[i], s.s[j] = s.s[j], s.s[i] }
 
 // Writing the result.
 
 var null = []byte("null")
 
-func (p *RawPatcher) emit(dst []byte, r ref) ([]byte, error) {
+func (p *RawPatcher) emit(dst []byte, r ref) []byte {
 	switch r.kind {
 	case refNull:
-		return append(dst, null...), nil
-	case refSpan, refElems:
-		return append(dst, p.bytesOf(r.buf)[r.start:r.end]...), nil
+		return append(dst, null...)
+	case refRaw:
+		return append(dst, p.bytesOf(r.buf)[r.start:r.end]...)
 	}
 	// As outputEntry.result: the object slot, else the array slot, else a
 	// non-empty string slot, else the source.
-	n := p.nodes[r.start]
-	if n.hasObject {
-		return p.emitObject(dst, r.start)
+	n := &p.nodes[r.start]
+	if n.object {
+		return p.emitObject(dst, n)
 	}
-	if n.hasArray {
+	if n.array {
 		dst = append(dst, '[')
-		first := true
+		comma := false
 		for i := n.first; i >= 0; i = p.items[i].next {
-			if p.items[i].slot != slotArray {
-				continue
-			}
-			if !first {
-				dst = append(dst, ',')
-			}
-			first = false
-			var err error
-			if dst, err = p.emit(dst, p.items[i].val); err != nil {
-				return dst, err
+			if it := p.items[i]; it.slot == slotArray {
+				if comma {
+					dst = append(dst, ',')
+				}
+				comma = true
+				dst = p.emit(dst, it.val)
 			}
 		}
-		return append(dst, ']'), nil
+		return append(dst, ']')
 	}
 	mark := len(dst)
 	dst = append(dst, '"')
 	for i := n.first; i >= 0; i = p.items[i].next {
-		if c := p.items[i].val; p.items[i].slot == slotString {
-			dst = append(dst, p.bytesOf(c.buf)[c.start:c.end]...)
+		if it := p.items[i]; it.slot == slotString {
+			dst = append(dst, p.bytesOf(it.val.buf)[it.val.start:it.val.end]...)
 		}
 	}
 	if len(dst) > mark+1 {
-		return append(dst, '"'), nil
+		return append(dst, '"')
 	}
 	return p.emit(dst[:mark], n.src)
 }
 
-// emitObject writes an object node: the base object's fields merged with
-// the fields set and deleted on top, all in key order.
-func (p *RawPatcher) emitObject(dst []byte, ni int32) ([]byte, error) {
-	n := &p.nodes[ni]
-	var bf, bn int32
-	if n.base.kind == refSpan {
-		if n.fields < 0 {
-			first, count, err := p.indexObject(n.base.buf, n.base.start, n.base.end, -1, 0)
-			if err != nil {
-				return dst, err
-			}
-			n = &p.nodes[ni]
-			n.fields, n.nfields = first, count
+// emitObject writes an object slot: its source's fields merged with the
+// fields set and deleted on top, in key order.
+func (p *RawPatcher) emitObject(dst []byte, n *node) []byte {
+	var base []member
+	if n.src.kind == refRaw {
+		if !n.indexed {
+			n.members, n.indexed = p.index(n.src.buf, span{n.src.start, n.src.end}, span{}), true
 		}
-		bf, bn = n.fields, n.nfields
+		base = p.members[n.members.start:n.members.end]
 	}
-	base := p.bytesOf(n.base.buf)
 
-	// Collect the changes, sort them stably by key, and keep the last
-	// change to each key.
-	mark := len(p.idx)
+	// The changes, sorted by key, keeping the last change to each key.
+	mark := len(p.changes)
 	for i := n.first; i >= 0; i = p.items[i].next {
 		if p.items[i].slot == slotObject {
-			p.idx = append(p.idx, i)
+			p.changes = append(p.changes, p.items[i])
 		}
 	}
-	if len(p.idx)-mark > 1 {
-		ch := p.idx[mark:]
-		p.sortItems(ch)
+	changes := p.changes[mark:]
+	if len(changes) > 1 {
+		p.changeSort = changeSorter{p, changes}
+		sort.Stable(&p.changeSort)
+		p.changeSort = changeSorter{}
 		w := 0
-		for j := range ch {
-			if j+1 < len(ch) && p.compareKeys(p.items[ch[j]].key, p.items[ch[j+1]].key) == 0 {
+		for j := range changes {
+			if j+1 < len(changes) && p.compareKeys(changes[j].key, changes[j+1].key) == 0 {
 				continue
 			}
-			ch[w] = ch[j]
+			changes[w] = changes[j]
 			w++
 		}
-		p.idx = p.idx[:mark+w]
+		changes = changes[:w]
 	}
-	end := len(p.idx)
 
 	dst = append(dst, '{')
-	wrote := false
-	bi, ci := int32(0), mark
-	for bi < bn || ci < end {
+	comma := false
+	for len(base) > 0 || len(changes) > 0 {
 		c := 1
 		switch {
-		case bi >= bn:
-		case ci >= end:
+		case len(base) == 0:
+		case len(changes) == 0:
 			c = -1
 		default:
-			c = p.compareKeys(p.fields[bf+bi].key, p.items[p.idx[ci]].key)
+			c = p.compareKeys(base[0].key, changes[0].key)
 		}
-		if wrote {
+		var k key
+		var v ref
+		if c < 0 {
+			m := base[0]
+			base = base[1:]
+			k, v = m.key, ref{kind: refRaw, buf: n.src.buf, start: m.val.start, end: m.val.end}
+		} else {
+			if c == 0 {
+				base = base[1:] // replaced or deleted
+			}
+			ch := changes[0]
+			changes = changes[1:]
+			if ch.del {
+				continue
+			}
+			k, v = ch.key, ch.val
+		}
+		if comma {
 			dst = append(dst, ',')
 		}
-		if c < 0 {
-			f := p.fields[bf+bi]
-			bi++
-			dst = append(dst, base[f.key.start:f.key.end]...)
-			dst = append(dst, ':')
-			dst = append(dst, base[f.start:f.end]...)
-			wrote = true
-			continue
-		}
-		if c == 0 {
-			bi++
-		}
-		it := p.items[p.idx[ci]]
-		ci++
-		if it.del {
-			if wrote {
-				dst = dst[:len(dst)-1]
-			}
-			continue
-		}
-		dst = append(dst, p.bytesOf(it.key.buf)[it.key.start:it.key.end]...)
+		comma = true
+		dst = append(dst, p.bytesOf(k.buf)[k.start:k.end]...)
 		dst = append(dst, ':')
-		var err error
-		if dst, err = p.emit(dst, it.val); err != nil {
-			return dst, err
-		}
-		wrote = true
+		dst = p.emit(dst, v)
 	}
-	p.idx = p.idx[:mark]
-	return append(dst, '}'), nil
+	p.changes = p.changes[:mark]
+	return append(dst, '}')
 }
