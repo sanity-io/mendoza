@@ -49,7 +49,8 @@ type RawPatcher struct {
 	nodes  []node
 	items  []item
 	fields []field
-	elems  []span
+	elems  []elem
+	kids   []kid
 	idx    []int32
 
 	ka, kb, str []byte // decode buffers
@@ -106,11 +107,26 @@ type key struct {
 
 // A field is an object member of a document or patch value.
 type field struct {
-	key        key
-	start, end int32 // the value
+	key         key
+	start, end  int32 // the value
+	kids, nkids int32 // the value's kids, or -1
 }
 
-type span struct{ start, end int32 }
+// An elem is an array element in the document.
+type elem struct {
+	start, end  int32
+	kids, nkids int32 // its kids, or -1
+}
+
+// A kid is a string or container directly inside a document container that
+// was skipped over: skipping stops at those anyway, so recording them is
+// nearly free, and indexing the container later jumps from kid to kid
+// instead of scanning it again. Numbers and literals are not recorded;
+// indexing scans the gaps between kids for them.
+type kid struct {
+	start, end int32
+	esc        bool // strings: has escapes
+}
 
 // Slots of a node.
 const (
@@ -149,6 +165,8 @@ type item struct {
 type input struct {
 	start, end int32
 	key        key   // the key it was pushed from; empty for elements and the root
+	kids       int32 // in p.kids, or -1 if not recorded
+	nkids      int32
 	fields     int32 // in p.fields, or -1 until indexed
 	nfields    int32
 	elems      int32 // in p.elems, or -1 until indexed
@@ -169,7 +187,7 @@ func (p *RawPatcher) Apply(dst, doc, patch []byte) ([]byte, error) {
 	if end < 0 || skipWS(doc, end) != len(doc) {
 		return dst, ErrInvalidJSON
 	}
-	p.in = append(p.in, input{start: int32(start), end: int32(end), key: emptyKey, fields: -1, elems: -1})
+	p.in = append(p.in, input{start: int32(start), end: int32(end), key: emptyKey, kids: -1, fields: -1, elems: -1})
 	root := ref{kind: refSpan, buf: bufDoc, start: int32(start), end: int32(end)}
 	if doc[start] == 'n' {
 		root = ref{} // null: ApplyPatch treats a nil source like Blank.
@@ -195,6 +213,7 @@ func (p *RawPatcher) reset(doc, patch []byte) {
 	p.items = p.items[:0]
 	p.fields = p.fields[:0]
 	p.elems = p.elems[:0]
+	p.kids = p.kids[:0]
 	p.idx = p.idx[:0]
 }
 
@@ -540,7 +559,7 @@ func (p *RawPatcher) opPushField(n int) error {
 	if err != nil {
 		return err
 	}
-	p.in = append(p.in, input{start: f.start, end: f.end, key: f.key, fields: -1, elems: -1})
+	p.in = append(p.in, input{start: f.start, end: f.end, key: f.key, kids: f.kids, nkids: f.nkids, fields: -1, elems: -1})
 	return nil
 }
 
@@ -556,7 +575,7 @@ func (p *RawPatcher) opPushElement(n int) error {
 		return ErrInvalidPatch
 	}
 	e := p.elems[int(first)+n]
-	p.in = append(p.in, input{start: e.start, end: e.end, key: emptyKey, fields: -1, elems: -1})
+	p.in = append(p.in, input{start: e.start, end: e.end, key: emptyKey, kids: e.kids, nkids: e.nkids, fields: -1, elems: -1})
 	return nil
 }
 
@@ -819,7 +838,7 @@ func (p *RawPatcher) inputField(n int) (field, error) {
 		if p.doc[in.start] != '{' {
 			return field{}, ErrInvalidPatch
 		}
-		first, count, err := p.indexObject(bufDoc, in.start, in.end)
+		first, count, err := p.indexObject(bufDoc, in.start, in.end, in.kids, in.nkids)
 		if err != nil {
 			return field{}, err
 		}
@@ -849,12 +868,13 @@ func (p *RawPatcher) inputElems() (int32, int32, error) {
 		in.elems, in.nelems = first, 0
 		return first, 0, nil
 	}
+	c := cursor{k: in.kids, end: in.kids + in.nkids}
 	for {
-		e := skipValue(b, i)
+		e, _, kids, nkids := p.child(b, i, &c, true)
 		if e < 0 || e > end {
 			return 0, 0, ErrInvalidJSON
 		}
-		p.elems = append(p.elems, span{int32(i), int32(e)})
+		p.elems = append(p.elems, elem{start: int32(i), end: int32(e), kids: kids, nkids: nkids})
 		i = skipWS(b, e)
 		if i >= end {
 			return 0, 0, ErrInvalidJSON
@@ -874,7 +894,7 @@ func (p *RawPatcher) inputElems() (int32, int32, error) {
 // indexObject appends the fields of the object at buf[start:end] to
 // p.fields, sorted by key with the last of any duplicates kept, which is the
 // order and content ApplyPatch sees in a decoded map.
-func (p *RawPatcher) indexObject(buf uint8, start, end int32) (int32, int32, error) {
+func (p *RawPatcher) indexObject(buf uint8, start, end, kids, nkids int32) (int32, int32, error) {
 	b := p.bytesOf(buf)
 	first := len(p.fields)
 	i := skipWS(b, int(start)+1)
@@ -882,12 +902,14 @@ func (p *RawPatcher) indexObject(buf uint8, start, end int32) (int32, int32, err
 	if i < e && b[i] == '}' {
 		return int32(first), 0, nil
 	}
+	c := cursor{k: kids, end: kids + nkids}
+	record := buf == bufDoc
 	sorted := true
 	for {
 		if i >= e || b[i] != '"' {
 			return 0, 0, ErrInvalidJSON
 		}
-		ke, esc := skipString(b, i)
+		ke, esc, _, _ := p.child(b, i, &c, false)
 		if ke < 0 {
 			return 0, 0, ErrInvalidJSON
 		}
@@ -897,14 +919,14 @@ func (p *RawPatcher) indexObject(buf uint8, start, end int32) (int32, int32, err
 			return 0, 0, ErrInvalidJSON
 		}
 		i = skipWS(b, i+1)
-		ve := skipValue(b, i)
+		ve, _, vk, vn := p.child(b, i, &c, record)
 		if ve < 0 || ve > e {
 			return 0, 0, ErrInvalidJSON
 		}
 		if sorted && len(p.fields) > first && p.compareKeys(p.fields[len(p.fields)-1].key, k) >= 0 {
 			sorted = false
 		}
-		p.fields = append(p.fields, field{key: k, start: int32(i), end: int32(ve)})
+		p.fields = append(p.fields, field{key: k, start: int32(i), end: int32(ve), kids: vk, nkids: vn})
 		i = skipWS(b, ve)
 		if i >= e {
 			return 0, 0, ErrInvalidJSON
@@ -933,6 +955,72 @@ func (p *RawPatcher) indexObject(buf uint8, start, end int32) (int32, int32, err
 		p.fields = p.fields[:first+w]
 	}
 	return int32(first), int32(len(p.fields) - first), nil
+}
+
+// A cursor walks the kids recorded for a container, in order.
+type cursor struct{ k, end int32 }
+
+// child returns the end of the value at b[i], whether it is a string with
+// escapes, and, if record is set and it is a container, its kids. A kid
+// recorded at i gives the end without scanning.
+func (p *RawPatcher) child(b []byte, i int, c *cursor, record bool) (int, bool, int32, int32) {
+	if c.k < c.end {
+		if k := p.kids[c.k]; int(k.start) == i {
+			c.k++
+			return int(k.end), k.esc, -1, 0
+		}
+	}
+	if i < len(b) {
+		switch b[i] {
+		case '"':
+			e, esc := skipString(b, i)
+			return e, esc, -1, 0
+		case '{', '[':
+			if record {
+				return p.skipRecord(b, i)
+			}
+		}
+	}
+	return skipValue(b, i), false, -1, 0
+}
+
+// skipRecord is skipContainer, recording the container's kids.
+func (p *RawPatcher) skipRecord(b []byte, i int) (int, bool, int32, int32) {
+	first := int32(len(p.kids))
+	depth, open := 0, 0
+	for i < len(b) {
+		c := b[i]
+		if !structural[c] {
+			i++
+			continue
+		}
+		switch c {
+		case '"':
+			e, esc := skipString(b, i)
+			if e < 0 {
+				return -1, false, -1, 0
+			}
+			if depth == 1 {
+				p.kids = append(p.kids, kid{start: int32(i), end: int32(e), esc: esc})
+			}
+			i = e
+			continue
+		case '{', '[':
+			depth++
+			if depth == 2 {
+				open = i
+			}
+		default: // '}', ']'
+			depth--
+			if depth == 1 {
+				p.kids = append(p.kids, kid{start: int32(open), end: int32(i + 1)})
+			} else if depth == 0 {
+				return i + 1, false, first, int32(len(p.kids)) - first
+			}
+		}
+		i++
+	}
+	return -1, false, -1, 0
 }
 
 // compareKeys compares two keys by their decoded content.
@@ -1025,7 +1113,7 @@ func (p *RawPatcher) emitObject(dst []byte, ni int32) ([]byte, error) {
 	var bf, bn int32
 	if n.base.kind == refSpan {
 		if n.fields < 0 {
-			first, count, err := p.indexObject(n.base.buf, n.base.start, n.base.end)
+			first, count, err := p.indexObject(n.base.buf, n.base.start, n.base.end, -1, 0)
 			if err != nil {
 				return dst, err
 			}
