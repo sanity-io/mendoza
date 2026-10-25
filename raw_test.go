@@ -14,26 +14,41 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// checkRaw applies the patch from left to right with RawPatcher, to left in
-// every encoding, and checks the result equals right, and ApplyPatch's.
+// checkRaw creates the patches from left to right and back, as
+// CreateDoublePatch does for gradient's apply and revert patches, and checks
+// RawPatcher gives the same results as ApplyPatch, with each side written in
+// every style.
 func checkRaw(t testing.TB, left, right interface{}, rng *rand.Rand) {
-	patch, err := mendoza.CreatePatch(left, right)
+	forward, back, err := mendoza.CreateDoublePatch(left, right)
 	require.NoError(t, err)
+	checkRawPatch(t, left, right, forward, rng)
+	checkRawPatch(t, right, left, back, rng)
+}
+
+func checkRawPatch(t testing.TB, from, to interface{}, patch mendoza.Patch, rng *rand.Rand) {
 	patchJSON, err := json.Marshal(patch)
 	require.NoError(t, err)
 
-	want := normalize(t, mendoza.ApplyPatch(left, patch))
-	require.Equal(t, normalize(t, right), want, "ApplyPatch itself")
+	want := normalize(t, mendoza.ApplyPatch(from, patch))
+	require.Equal(t, normalize(t, to), want, "ApplyPatch itself")
 
 	var p mendoza.RawPatcher
 	for _, style := range styles {
-		doc := encode(nil, left, style, rng)
+		doc := encode(nil, from, style, rng)
 		got, err := p.Apply(nil, doc, patchJSON)
 		require.NoError(t, err, "style %s\ndoc:   %s\npatch: %s", style.name, doc, patchJSON)
 		require.True(t, json.Valid(got), "style %s: invalid JSON %s", style.name, got)
 		require.Equal(t, want, normalize(t, decode(t, got)),
 			"style %s\ndoc:   %s\npatch: %s\ngot:   %s", style.name, doc, patchJSON, got)
 	}
+}
+
+// requireRawPatch applies patch to doc, as written, and checks the result
+// is want.
+func requireRawPatch(t testing.TB, doc string, patch []byte, want interface{}) {
+	got, err := mendoza.ApplyRawPatch([]byte(doc), patch)
+	require.NoError(t, err, "doc %s patch %s", doc, patch)
+	require.EqualValues(t, want, decode(t, got), "doc %s patch %s got %s", doc, patch, got)
 }
 
 func decode(t testing.TB, b []byte) interface{} {
