@@ -154,6 +154,10 @@ func TestRoundtrip(t *testing.T) {
 			require.NoError(t, err)
 			require.EqualValues(t, patch2, parsedPatch2)
 			require.EqualValues(t, parsedPatch2, decodedPatch2)
+
+			// RawPatcher gives the same results, on the documents as written.
+			requireRawPatch(t, pair.Left, json1, right)
+			requireRawPatch(t, pair.Right, json2, left)
 		})
 	}
 }
