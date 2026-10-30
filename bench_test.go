@@ -30,8 +30,8 @@ func makeDoc(nBlocks int, edit bool) map[string]interface{} {
 		"title": title, "slug": map[string]interface{}{"_type": "slug", "current": "my-article"},
 		"publishedAt": "2026-10-30T10:00:00Z", "views": float64(42), "featured": true,
 		"author": map[string]interface{}{"_type": "reference", "_ref": "author-1"},
-		"tags": []interface{}{"go", "json", "diff"},
-		"body": blocks,
+		"tags":   []interface{}{"go", "json", "diff"},
+		"body":   blocks,
 	}
 	// round-trip through JSON so it looks like real decoded input
 	b, _ := json.Marshal(doc)

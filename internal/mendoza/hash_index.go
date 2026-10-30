@@ -4,7 +4,6 @@ package mendoza
 // Lists are stored as intrusive chains in one node slice, so building the
 // index allocates nothing once the maps and slice have grown (it is reusable).
 type HashIndex struct {
-	Data    map[Hash]chain
 	XorData map[Hash]chain
 	nodes   []node
 }
@@ -18,7 +17,7 @@ func NewHashIndex(hashList *HashList) *HashIndex {
 	return h
 }
 
-func (h *HashIndex) push(m map[Hash]chain, key Hash, idx int) {
+func push[K comparable](h *HashIndex, m map[K]chain, key K, idx int) {
 	n := int32(len(h.nodes))
 	h.nodes = append(h.nodes, node{idx: int32(idx), next: -1})
 	if c, ok := m[key]; ok {
@@ -31,18 +30,15 @@ func (h *HashIndex) push(m map[Hash]chain, key Hash, idx int) {
 }
 
 func (h *HashIndex) Build(hashList *HashList) {
-	if h.Data == nil {
-		h.Data = make(map[Hash]chain, len(hashList.Entries))
+	if h.XorData == nil {
 		h.XorData = make(map[Hash]chain, len(hashList.Entries))
 	} else {
-		clear(h.Data)
 		clear(h.XorData)
 	}
 	h.nodes = h.nodes[:0]
 
 	for idx := range hashList.Entries {
 		entry := &hashList.Entries[idx]
-		h.push(h.Data, entry.Hash, idx)
 
 		if !entry.XorHash.IsNull() {
 			for it := hashList.Iter(idx); !it.IsDone(); it.Next() {
@@ -51,7 +47,7 @@ func (h *HashIndex) Build(hashList *HashList) {
 				if c, ok := h.XorData[xorHash]; ok && h.nodes[c.tail].idx == int32(idx) {
 					continue // already present
 				}
-				h.push(h.XorData, xorHash, idx)
+				push(h, h.XorData, xorHash, idx)
 			}
 		}
 	}
@@ -63,10 +59,9 @@ type ChainIter struct {
 	cur   int32
 }
 
-func (h *HashIndex) Lookup(key Hash) ChainIter    { return h.iter(h.Data, key) }
-func (h *HashIndex) LookupXor(key Hash) ChainIter { return h.iter(h.XorData, key) }
+func (h *HashIndex) LookupXor(key Hash) ChainIter { return iter(h, h.XorData, key) }
 
-func (h *HashIndex) iter(m map[Hash]chain, key Hash) ChainIter {
+func iter[K comparable](h *HashIndex, m map[K]chain, key K) ChainIter {
 	if c, ok := m[key]; ok {
 		return ChainIter{h.nodes, c.head}
 	}

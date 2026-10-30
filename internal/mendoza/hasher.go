@@ -20,6 +20,17 @@ func (h *Hash) Xor(other Hash) {
 
 func (h Hash) IsNull() bool { return h == Hash{} }
 
+// Words returns the hash as two 64-bit words.
+func (h Hash) Words() (uint64, uint64) {
+	return binary.LittleEndian.Uint64(h[:8]), binary.LittleEndian.Uint64(h[8:])
+}
+
+// SetWords sets the hash from two 64-bit words.
+func (h *Hash) SetWords(a, b uint64) {
+	binary.LittleEndian.PutUint64(h[:8], a)
+	binary.LittleEndian.PutUint64(h[8:], b)
+}
+
 func mk(a, b uint64) (h Hash) {
 	binary.LittleEndian.PutUint64(h[:8], a)
 	binary.LittleEndian.PutUint64(h[8:], b)

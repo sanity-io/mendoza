@@ -43,14 +43,23 @@ var sink64 uint64
 
 func BenchmarkHashStrInternal(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ { sink = mendoza.HashString(str) }
+	for i := 0; i < b.N; i++ {
+		sink = mendoza.HashString(str)
+	}
 }
 func BenchmarkHashStrStdlibSHA256(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ { s := sha256.Sum256([]byte(str)); copy(sink[:], s[:16]) }
+	for i := 0; i < b.N; i++ {
+		s := sha256.Sum256([]byte(str))
+		copy(sink[:], s[:16])
+	}
 }
+
 var seed1, seed2 = maphash.MakeSeed(), maphash.MakeSeed()
+
 func BenchmarkHashStrMaphash2x(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ { sink64 = maphash.String(seed1, str) ^ maphash.String(seed2, str) }
+	for i := 0; i < b.N; i++ {
+		sink64 = maphash.String(seed1, str) ^ maphash.String(seed2, str)
+	}
 }

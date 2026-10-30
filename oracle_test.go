@@ -1,0 +1,832 @@
+package mendoza
+
+import (
+	"sync"
+	"unicode/utf8"
+
+	"github.com/sanity-io/mendoza/internal/mendoza"
+)
+
+// oScratch holds the per-call working memory of the oDiffer. It is pooled so that
+// steady-state diffing does not re-grow entry slices, maps and key buffers.
+type oScratch struct {
+	left, right       mendoza.HashList
+	leftIdx, rightIdx mendoza.HashIndex
+}
+
+var oScratchPool = sync.Pool{New: func() interface{} { return new(oScratch) }}
+
+func oGetScratch() *oScratch { return oScratchPool.Get().(*oScratch) }
+
+func oPutScratch(s *oScratch) {
+	s.left.Reset(nil)
+	s.right.Reset(nil)
+	oScratchPool.Put(s)
+}
+
+type oDiffer struct {
+	left      *mendoza.HashList
+	right     *mendoza.HashList
+	hashIndex *mendoza.HashIndex
+	options   *Options
+	globalIdx map[mendoza.Hash][]int
+}
+
+// Creates a patch which can be applied to the left document to produce the right document.
+//
+// This function uses the default options.
+func oCreatePatchDefault(left, right interface{}) (Patch, error) {
+	return oCreatePatch(&DefaultOptions, left, right)
+}
+
+// Creates two patches: The first can be applied to the left document to produce the right document,
+// the second can be applied to the right document to produce the left document.
+//
+// This function uses the default options.
+func oCreateDoublePatchDefault(left, right interface{}) (Patch, Patch, error) {
+	return oCreateDoublePatch(&DefaultOptions, left, right)
+}
+
+// Creates a patch which can be applied to the left document to produce the right document.
+func oCreatePatch(options *Options, left, right interface{}) (Patch, error) {
+	if left == nil {
+		if right == nil {
+			return Patch{}, nil
+		}
+		return Patch{&OpValue{right}}, nil
+	}
+
+	sc := oGetScratch()
+	defer oPutScratch(sc)
+	if err := sc.left.Fill(left, options.convertFunc); err != nil {
+		return nil, err
+	}
+	if err := sc.right.Fill(right, options.convertFunc); err != nil {
+		return nil, err
+	}
+
+	sc.leftIdx.Build(&sc.left)
+	oDiffer := oDiffer{
+		left:      &sc.left,
+		right:     &sc.right,
+		hashIndex: &sc.leftIdx,
+		options:   options,
+	}
+	return oDiffer.build(), nil
+}
+
+// Creates two patches: The first can be applied to the left document to produce the right document,
+// the second can be applied to the right document to produce the left document.
+func oCreateDoublePatch(options *Options, left, right interface{}) (Patch, Patch, error) {
+	if left == nil && right == nil {
+		return Patch{}, Patch{}, nil
+	}
+
+	if left == nil {
+		return Patch{&OpValue{right}}, Patch{&OpValue{nil}}, nil
+	}
+
+	if right == nil {
+		return Patch{&OpValue{nil}}, Patch{&OpValue{left}}, nil
+	}
+
+	sc := oGetScratch()
+	defer oPutScratch(sc)
+	if err := sc.left.Fill(left, options.convertFunc); err != nil {
+		return nil, nil, err
+	}
+	if err := sc.right.Fill(right, options.convertFunc); err != nil {
+		return nil, nil, err
+	}
+	leftList, rightList := &sc.left, &sc.right
+
+	sc.leftIdx.Build(leftList)
+	leftHashIndex := &sc.leftIdx
+	leftDiffer := oDiffer{
+		left:      leftList,
+		right:     rightList,
+		hashIndex: leftHashIndex,
+		options:   options,
+	}
+
+	sc.rightIdx.Build(rightList)
+	rightHashIndex := &sc.rightIdx
+	rightDiffer := oDiffer{
+		left:      rightList,
+		right:     leftList,
+		hashIndex: rightHashIndex,
+		options:   options,
+	}
+	return leftDiffer.build(), rightDiffer.build(), nil
+}
+
+/*
+
+The main function in the oDiffer is `reconstruct` which takes two parameters.
+The first is the target value: a reference to a value in the right-hand side.
+The second parameter is a slice of _requests_. A oRequest has an _initial
+context_ which is a reference to a value in the left-hand side. The goal of
+`reconstruct` is then, for each oRequest, build a patch which converts the
+_initial context_ into the target value.  Every oRequest also keeps track of the
+_best size_.
+
+For arrays/objects this is done in a few steps:
+
+1. First we look at the target (ignoring any context) and find other values that are good candidates.
+   This is a cheap check which uses the global hash index and only looks for objects/arrays that
+   shares some fields/elements with the target. This can only check for exact equality.
+
+2. Then we do filtering of candidates based on the requests' context:
+   - Currently we only care about candidates that are direct children of the context.
+   - Per oRequest we pick the N best candidates to explore. This is just an heuristic because we only know
+     "how many fields/elements they have in common" and nothing about the size of representing the patch of
+     the differences.
+
+3. For each field/element in the target we can then build a list of requests (based on the candidates)
+   and recurse into `reconstruct`. The more candidates we have in the previous step, the more requests
+   we'll have in this step, and the time complexity will be higher.
+
+4. At this point we know have full information about each candidate: All patches are calculated.
+   We then just need to connect each candidate with a oRequest and we're done!
+
+*/
+
+// global is the oracle's own hash -> entries index (ascending), as in upstream.
+func (d *oDiffer) global(h mendoza.Hash) []int {
+	if d.globalIdx == nil {
+		d.globalIdx = map[mendoza.Hash][]int{}
+		for i := range d.left.Entries {
+			d.globalIdx[d.left.Entries[i].Hash] = append(d.globalIdx[d.left.Entries[i].Hash], i)
+		}
+	}
+	return d.globalIdx[h]
+}
+
+func (d *oDiffer) build() Patch {
+	root := d.right.Entries[0]
+
+	if d.left.Entries[0].Hash == root.Hash {
+		// Exact same value
+		return Patch{}
+	}
+
+	reqs := []oRequest{
+		{
+			contextIdx: -1,
+			primaryIdx: 0,
+			size:       root.Size + 1,
+		},
+	}
+
+	d.reconstruct(0, reqs)
+
+	req := reqs[0]
+
+	if req.patch == nil {
+		return Patch{&OpValue{root.Value}}
+	}
+
+	return req.patch
+}
+
+type oRequest struct {
+	contextIdx int
+	primaryIdx int
+	size       int
+	patch      Patch
+	outputKey  string
+}
+
+func (req *oRequest) update(patch Patch, size int, outputKey string) {
+	if size < req.size {
+		req.patch = patch
+		req.size = size
+		req.outputKey = outputKey
+	}
+}
+
+func (d *oDiffer) reconstruct(idx int, reqs []oRequest) {
+	if len(reqs) == 0 {
+		return
+	}
+
+	entry := d.right.Entries[idx]
+
+	if entry.IsNonEmptyMap() {
+		d.reconstructMap(idx, reqs)
+		return
+	}
+
+	if entry.IsNonEmptySlice() {
+		d.reconstructSlice(idx, reqs)
+		return
+	}
+
+	if rightString, ok := entry.Value.(string); ok {
+		d.reconstructString(idx, rightString, reqs)
+		return
+	}
+}
+
+func (d *oDiffer) enterBlank(patch *Patch, idx int) {
+	if idx == 0 {
+		*patch = append(*patch, &OpBlank{})
+		return
+	}
+
+	entry := d.left.Entries[idx]
+	parentEntry := d.left.Entries[entry.Parent]
+
+	var op Op
+
+	if parentEntry.IsNonEmptyMap() {
+		op = &OpPushFieldBlank{OpPushField: OpPushField{entry.Reference.Index}}
+	} else {
+		op = &OpPushElementBlank{OpPushElement: OpPushElement{entry.Reference.Index}}
+	}
+
+	*patch = append(*patch, op)
+}
+
+func (d *oDiffer) enterCopy(patch *Patch, idx int) {
+	if idx == 0 {
+		// Root => Already on the stack.
+		return
+	}
+
+	entry := d.left.Entries[idx]
+	parentEntry := d.left.Entries[entry.Parent]
+
+	var op Op
+
+	if parentEntry.IsNonEmptyMap() {
+		op = &OpPushFieldCopy{OpPushField: OpPushField{entry.Reference.Index}}
+	} else {
+		op = &OpPushElementCopy{OpPushElement: OpPushElement{entry.Reference.Index}}
+	}
+
+	*patch = append(*patch, op)
+}
+
+/*
+
+Some notes about how we're building up calls from candidates:
+
+An object has multiple fields: {"a": "…", "b": …, "c": …}, and we find candidates of objects that are similar.
+
+Imagine that we found three candidates:
+  - cand1 has {"a": "…", "b": …, "c": "different"}
+  - cand2 has {"a": "…", "b": "different", "c": …}
+  - cand3 has {"a": "…", "b": "different", "c": "different"}
+  - cand4 has {"a": "…", "b": …, "c": "different2"}
+
+The crucial thing here is that we only need 2 recursive `reconstruct` calls (because `a` is equal in all candidates),
+but some of the calls might have multiple requests.
+
+In this case the 2 recursive calls are as follows:
+
+- Reconstruct "c" with requests: [cand1, cand3, cand4]
+- Reconstruct "b" with requests: [cand2, cand3]
+
+*/
+
+// This stores information about each candidate map in the left-side document.
+type oMapCandidate struct {
+	alias      map[string]oMapAlias
+	seenKeys   map[string]struct{}
+	requestIdx int
+	contextIdx int
+}
+
+type oMapAlias struct {
+	fieldIdx int
+	sameKey  bool
+}
+
+func (mc *oMapCandidate) init(contextIdx int, requestIdx int) {
+	mc.alias = make(map[string]oMapAlias)
+	mc.seenKeys = make(map[string]struct{})
+	mc.requestIdx = requestIdx
+	mc.contextIdx = contextIdx
+}
+
+func (mc *oMapCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
+	current, currentOk := mc.alias[target.Key]
+
+	mc.seenKeys[target.Key] = struct{}{}
+
+	if target.Key == source.Key {
+		mc.alias[target.Key] = oMapAlias{
+			fieldIdx: source.Index,
+			sameKey:  true,
+		}
+		return
+	}
+
+	if currentOk {
+		if current.sameKey {
+			// Prefer sameKey
+			return
+		}
+
+		if current.fieldIdx < source.Index {
+			// Prefer lowest fieldIdx to ensure consistent patches
+			return
+		}
+	}
+
+	mc.alias[target.Key] = oMapAlias{
+		fieldIdx: source.Index,
+		sameKey:  false,
+	}
+}
+
+func (mc *oMapCandidate) IsMissing(reference mendoza.Reference) bool {
+	_, ok := mc.alias[reference.Key]
+	return !ok
+}
+
+func (mc *oMapCandidate) RegisterRequest(childIdx int, childRef mendoza.Reference, reqIdx int) {
+	mc.seenKeys[childRef.Key] = struct{}{}
+}
+
+func (d *oDiffer) reconstructMap(idx int, reqs []oRequest) {
+	// right-index -> list of requests
+	fieldRequests := [][]oRequest{}
+
+	// The input here is a list of requests. Each requests has _context_ and _primary_ which looks like this:
+	//
+	//   Left           Right
+	//     |
+	//   Context
+	//     |
+	//   Primary        Target
+	//
+	// The mandate of this method is to "assuming the program is currently in _context_; create a patch which
+	// produces _target_". Note that _primary_ is just a hint for where this method could look for differences.
+	// It's typically the field with same name, or an element in the same position. We can also assume that
+	// _primary_ is different from _target_ (otherwise why would you ask for the differences?).
+	//
+	// Note that context can either be an array or an object.
+
+	// Currently we're only looking at primary.
+
+	candidates := make([]oMapCandidate, 0, len(reqs))
+
+	for i, req := range reqs {
+		if !d.left.Entries[req.primaryIdx].IsNonEmptyMap() {
+			continue
+		}
+
+		cand := oMapCandidate{}
+		cand.init(req.primaryIdx, i)
+		candidates = append(candidates, cand)
+	}
+
+	entry := d.right.Entries[idx]
+
+	// Use the xor-index to find fields that oDiffer a bit
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		fieldEntry := it.GetEntry()
+
+		xorHash := entry.XorHash
+		xorHash.Xor(fieldEntry.Hash)
+
+		for ci := d.hashIndex.LookupXor(xorHash); ; {
+			otherIdx, ok := ci.Next()
+			if !ok {
+				break
+			}
+			otherEntry := d.left.Entries[otherIdx]
+
+			for i, req := range reqs {
+				if otherEntry.Parent == req.contextIdx && otherIdx != req.primaryIdx {
+					cand := oMapCandidate{}
+					cand.init(otherIdx, i)
+					candidates = append(candidates, cand)
+				}
+			}
+		}
+	}
+
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		fieldEntry := it.GetEntry()
+		fieldRequests = append(fieldRequests, nil)
+
+		for _, otherIdx := range d.global(fieldEntry.Hash) {
+			otherEntry := d.left.Entries[otherIdx]
+
+			for candIdx := range candidates {
+				cand := &candidates[candIdx]
+				if cand.contextIdx == otherEntry.Parent {
+					cand.insertAlias(fieldEntry.Reference, otherEntry.Reference, fieldEntry.Size)
+				}
+			}
+		}
+	}
+
+	// Now build the requests
+	for _, cand := range candidates {
+		contextIter := d.left.Iter(cand.contextIdx)
+
+		i := 0
+		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+			fieldEntry := it.GetEntry()
+			fieldKey := fieldEntry.Reference.Key
+
+			cand.seenKeys[fieldKey] = struct{}{}
+
+			if _, ok := cand.alias[fieldKey]; !ok {
+				for !contextIter.IsDone() {
+					key := contextIter.GetKey()
+
+					if key > fieldKey {
+						break
+					}
+
+					if key == fieldKey {
+						fieldReqs := fieldRequests[i]
+						fieldReqs = append(fieldReqs, oRequest{
+							contextIdx: cand.contextIdx,
+							primaryIdx: contextIter.GetIndex(),
+							size:       fieldEntry.Size + 1,
+						})
+						fieldRequests[i] = fieldReqs
+						break
+					}
+
+					contextIter.Next()
+				}
+			}
+			i++
+		}
+	}
+
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		d.reconstruct(it.GetIndex(), fieldRequests[it.GetEntry().Reference.Index])
+	}
+
+	for _, cand := range candidates {
+		primaryIdx := cand.contextIdx
+
+		size := 0
+		patch := Patch{}
+
+		removeKeys := map[string]int{}
+
+		for it := d.left.Iter(primaryIdx); !it.IsDone(); it.Next() {
+			ref := it.GetEntry().Reference
+			if _, ok := cand.seenKeys[ref.Key]; ok {
+				// do nothing
+			} else {
+				removeKeys[ref.Key] = ref.Index
+			}
+		}
+
+		removeCount := len(removeKeys)
+		aliasCount := len(cand.alias)
+
+		isCopy := false
+
+		if removeCount < aliasCount {
+			// Note: This doesn't currently take into account that we have two types of aliasing.
+			// It's shorter to alias a field with the same key (one single copy field).
+			// For now let's assume that the difference here is pretty small either way.
+			isCopy = true
+		}
+
+		if isCopy {
+			d.enterCopy(&patch, primaryIdx)
+		} else {
+			d.enterBlank(&patch, primaryIdx)
+		}
+
+		size += 2
+
+		if isCopy {
+			// Delete fields we don't need
+			for _, removeIdx := range removeKeys {
+				patch = append(patch, &OpObjectDeleteField{removeIdx})
+				size += 2
+			}
+		}
+
+		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+			fieldEntry := it.GetEntry()
+			fieldKey := fieldEntry.Reference.Key
+
+			if alias, ok := cand.alias[fieldKey]; ok {
+				if alias.sameKey {
+					if !isCopy {
+						// We only need this if we're starting with a blank object
+						patch = append(patch, &OpObjectCopyField{OpPushField: OpPushField{alias.fieldIdx}})
+						size += 2
+					}
+				} else {
+					patch = append(patch,
+						&OpPushFieldCopy{OpPushField: OpPushField{alias.fieldIdx}},
+						&OpReturnIntoObjectPop{OpReturnIntoObject: OpReturnIntoObject{fieldKey}},
+					)
+					size += 2 + 1 + len(fieldKey)
+				}
+			} else {
+				didPatch := false
+
+				// Not an alias. Look up the real diff.
+				for _, fieldReq := range fieldRequests[fieldEntry.Reference.Index] {
+					if fieldReq.contextIdx == cand.contextIdx {
+						// Match it up with the correct context
+						if fieldReq.patch != nil {
+							patch = append(patch, fieldReq.patch...)
+							size += fieldReq.size
+
+							if fieldReq.outputKey == fieldKey {
+								patch = append(patch, &OpReturnIntoObjectSameKeyPop{})
+								size += 1
+							} else {
+								patch = append(patch, &OpReturnIntoObjectPop{OpReturnIntoObject: OpReturnIntoObject{fieldKey}})
+								size += 1 + len(fieldKey)
+							}
+							didPatch = true
+						}
+
+						break
+					}
+				}
+
+				if !didPatch {
+					patch = append(patch, &OpObjectSetFieldValue{
+						OpValue{fieldEntry.Value},
+						OpReturnIntoObject{fieldKey},
+					})
+					size += 1 + len(fieldKey) + fieldEntry.Size
+				}
+			}
+		}
+
+		req := &reqs[cand.requestIdx]
+		req.update(patch, size, d.left.Entries[primaryIdx].Reference.Key)
+	}
+}
+
+type oSliceRequestData struct {
+	candidates map[int]*oSliceCandidate
+}
+
+type oSliceAlias struct {
+	elementIdx     int
+	prevIsAdjacent bool
+	nextIsAdjacent bool
+}
+
+type oSliceCandidate struct {
+	alias      map[int]oSliceAlias
+	requestIdx int
+	contextIdx int
+}
+
+func (sc *oSliceCandidate) init(contextIdx int, requestIdx int) {
+	sc.alias = map[int]oSliceAlias{}
+	sc.requestIdx = requestIdx
+	sc.contextIdx = contextIdx
+}
+
+func (sc *oSliceCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
+	// We assume here that you'll only invoke this method in the same order
+	// as you want to build the array.
+
+	current, ok := sc.alias[target.Index]
+
+	if ok && current.prevIsAdjacent {
+		// Once we've found something which is adjacent. Don't look any further.
+		return
+	}
+
+	if prevSource, prevOk := sc.alias[target.Index-1]; prevOk {
+		if prevSource.elementIdx+1 == source.Index {
+			// This one is perfectly adjacent. Use it!
+			sc.alias[target.Index] = oSliceAlias{
+				elementIdx:     source.Index,
+				prevIsAdjacent: true,
+			}
+			prevSource.nextIsAdjacent = true
+			sc.alias[target.Index-1] = prevSource
+			return
+		}
+
+		if source.Index <= prevSource.elementIdx {
+			// We want to prefer values that are _after_ the previous index.
+
+			if ok {
+				// However, we can only return if we've already found a value.
+				// Otherwise we must use this new value.
+				return
+			}
+		}
+	}
+
+	if ok && current.elementIdx < source.Index {
+		// Prefer smaller over larger
+		return
+	}
+
+	sc.alias[target.Index] = oSliceAlias{
+		elementIdx:     source.Index,
+		prevIsAdjacent: false,
+	}
+}
+
+func (d *oDiffer) reconstructSlice(idx int, reqs []oRequest) {
+	// right-index -> requests
+	elementRequests := [][]oRequest{}
+
+	candidates := make([]oSliceCandidate, 0, len(reqs))
+
+	for i, req := range reqs {
+		if !d.left.Entries[req.primaryIdx].IsNonEmptySlice() {
+			continue
+		}
+
+		cand := oSliceCandidate{}
+		cand.init(req.primaryIdx, i)
+		candidates = append(candidates, cand)
+	}
+
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		elementEntry := it.GetEntry()
+		elementRequests = append(elementRequests, nil)
+
+		for _, otherIdx := range d.global(elementEntry.Hash) {
+			otherEntry := d.left.Entries[otherIdx]
+
+			for candIdx := range candidates {
+				cand := &candidates[candIdx]
+				if cand.contextIdx == otherEntry.Parent {
+					cand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
+				}
+			}
+		}
+	}
+
+	// Now build the requests
+	for _, cand := range candidates {
+		contextIter := d.left.Iter(cand.contextIdx)
+
+		i := 0
+		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+			if contextIter.IsDone() {
+				break
+			}
+
+			elementEntry := it.GetEntry()
+
+			if _, ok := cand.alias[elementEntry.Reference.Index]; !ok {
+				elementReqs := elementRequests[i]
+				elementReqs = append(elementReqs, oRequest{
+					contextIdx: cand.contextIdx,
+					primaryIdx: contextIter.GetIndex(),
+					size:       elementEntry.Size + 1,
+				})
+				elementRequests[i] = elementReqs
+
+			}
+
+			i++
+			contextIter.Next()
+		}
+	}
+
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		d.reconstruct(it.GetIndex(), elementRequests[it.GetEntry().Reference.Index])
+	}
+
+	for _, cand := range candidates {
+		contextIdx := cand.contextIdx
+		size := 0
+		patch := Patch{}
+
+		d.enterBlank(&patch, contextIdx)
+		size += 2
+
+		startSlice := -1
+
+		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+			elementEntry := it.GetEntry()
+			pos := elementEntry.Reference.Index
+
+			if alias, ok := cand.alias[pos]; ok {
+				if startSlice == -1 {
+					startSlice = alias.elementIdx
+				}
+
+				if alias.nextIsAdjacent {
+					// The next one is adjacent. We don't need to do anything!
+				} else {
+					patch = append(patch, &OpArrayAppendSlice{startSlice, alias.elementIdx + 1})
+					size += 3
+					startSlice = -1
+				}
+			} else {
+				didPatch := false
+
+				for _, elementReq := range elementRequests[pos] {
+					if elementReq.contextIdx == contextIdx {
+						if elementReq.patch != nil {
+							patch = append(patch, elementReq.patch...)
+							size += elementReq.size
+							patch = append(patch, &OpReturnIntoArrayPop{})
+							size += 1
+
+							didPatch = true
+						}
+
+						break
+					}
+				}
+
+				if !didPatch {
+					patch = append(patch, &OpArrayAppendValue{elementEntry.Value})
+					size += 1 + elementEntry.Size
+				}
+			}
+		}
+
+		req := &reqs[cand.requestIdx]
+		req.update(patch, size, d.left.Entries[contextIdx].Reference.Key)
+	}
+
+}
+
+// String handling
+
+func oCommonPrefix(a, b string) int {
+	i := 0
+	for i < len(a) && i < len(b) {
+		ar, size := utf8.DecodeRuneInString(a[i:])
+		br, _ := utf8.DecodeRuneInString(b[i:])
+		if ar != br {
+			break
+		}
+		i += size
+	}
+	return i
+}
+
+func oCommonSuffix(a, b string, prefix int) int {
+	i := 0
+	for i < len(a)-prefix && i < len(b)-prefix {
+		ar, size := utf8.DecodeLastRuneInString(a[:len(a)-i])
+		br, _ := utf8.DecodeLastRuneInString(b[:len(b)-i])
+
+		if ar != br {
+			break
+		}
+
+		i += size
+	}
+	return i
+}
+
+func (d *oDiffer) reconstructString(idx int, rightString string, reqs []oRequest) {
+	for reqIdx, req := range reqs {
+		leftEntry := d.left.Entries[req.primaryIdx]
+
+		leftString, ok := leftEntry.Value.(string)
+		if !ok {
+			continue
+		}
+
+		if leftString == rightString {
+			panic("unnecessary reconstruction of string")
+		}
+
+		patch := Patch{}
+		size := 0
+
+		d.enterBlank(&patch, req.primaryIdx)
+		size += 2
+
+		prefix := oCommonPrefix(leftString, rightString)
+
+		if prefix > 0 {
+			patch = append(patch, &OpStringAppendSlice{0, prefix})
+			size += 3
+		}
+
+		suffix := oCommonSuffix(leftString, rightString, prefix)
+
+		mid := rightString[prefix : len(rightString)-suffix]
+		if len(mid) > 0 {
+			patch = append(patch, &OpStringAppendString{mid})
+			size += 1 + len(mid)
+		}
+
+		if suffix > 0 {
+			patch = append(patch, &OpStringAppendSlice{len(leftString) - suffix, len(leftString)})
+			size += 3
+		}
+
+		req := &reqs[reqIdx]
+		req.update(patch, size, d.left.Entries[req.primaryIdx].Reference.Key)
+	}
+}
