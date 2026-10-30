@@ -2,14 +2,23 @@ package mendoza
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 )
 
 // HashList stores a document as a flat list of entries. Each entry contains a hash of its contents, allowing you
 // to quickly find equivalent sub trees.
 type HashList struct {
-	Entries []HashEntry
+	Entries     []HashEntry
 	convertFunc func(value interface{}) interface{}
+	keyBuf      []string // scratch stack for sorted keys, reused across documents
+}
+
+// Reset prepares the list for reuse while keeping its backing arrays.
+func (hashList *HashList) Reset(convertFunc func(value interface{}) interface{}) {
+	clear(hashList.Entries) // drop references so the GC can reclaim old documents
+	hashList.Entries = hashList.Entries[:0]
+	hashList.keyBuf = hashList.keyBuf[:0]
+	hashList.convertFunc = convertFunc
 }
 
 func HashListFor(doc interface{}, convertFunc func(value interface{}) interface{}) (*HashList, error) {
@@ -19,6 +28,12 @@ func HashListFor(doc interface{}, convertFunc func(value interface{}) interface{
 		return nil, err
 	}
 	return hashList, nil
+}
+
+// Fill resets the list and hashes doc into it, reusing existing capacity.
+func (hashList *HashList) Fill(doc interface{}, convertFunc func(value interface{}) interface{}) error {
+	hashList.Reset(convertFunc)
+	return hashList.AddDocument(doc)
 }
 
 type Reference struct {
@@ -93,12 +108,20 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 		result = HashString(obj)
 		size = len(obj) + 1
 	case map[string]interface{}:
-		hasher := HasherMap
-		keys := sortedKeys(obj)
+		hasher := NewMapHasher()
+		base := len(hashList.keyBuf)
+		for key := range obj {
+			hashList.keyBuf = append(hashList.keyBuf, key)
+		}
+		slices.Sort(hashList.keyBuf[base:])
+		keys := hashList.keyBuf[base:]
 
 		prevIdx := -1
 
-		for idx, key := range keys {
+		_ = keys
+		n := len(hashList.keyBuf) - base
+		for idx := 0; idx < n; idx++ {
+			key := hashList.keyBuf[base+idx]
 			value := obj[key]
 			entryIdx := len(hashList.Entries)
 			valueHash, valueSize, err := hashList.process(current, MapEntryReference(idx, key), value)
@@ -119,9 +142,11 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 			xorHash.Xor(valueHash)
 		}
 
+		clear(hashList.keyBuf[base:])
+		hashList.keyBuf = hashList.keyBuf[:base]
 		result = hasher.Sum()
 	case []interface{}:
-		hasher := HasherSlice
+		hasher := NewSliceHasher()
 
 		prevIdx := -1
 
@@ -158,8 +183,8 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 	return result, size, nil
 }
 
-func (hashList *HashList) Iter(idx int) *Iter {
-	return &Iter{
+func (hashList *HashList) Iter(idx int) Iter {
+	return Iter{
 		hashList: hashList,
 		idx:      idx + 1,
 	}
@@ -174,8 +199,8 @@ func (it *Iter) GetIndex() int {
 	return it.idx
 }
 
-func (it *Iter) GetEntry() HashEntry {
-	return it.hashList.Entries[it.idx]
+func (it *Iter) GetEntry() *HashEntry {
+	return &it.hashList.Entries[it.idx]
 }
 
 func (it *Iter) GetKey() string {
@@ -188,13 +213,4 @@ func (it *Iter) IsDone() bool {
 
 func (it *Iter) Next() {
 	it.idx = it.GetEntry().Sibling
-}
-
-func sortedKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }

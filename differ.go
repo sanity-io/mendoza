@@ -1,9 +1,28 @@
 package mendoza
 
 import (
-	"github.com/sanity-io/mendoza/internal/mendoza"
+	"sync"
 	"unicode/utf8"
+
+	"github.com/sanity-io/mendoza/internal/mendoza"
 )
+
+// scratch holds the per-call working memory of the differ. It is pooled so that
+// steady-state diffing does not re-grow entry slices, maps and key buffers.
+type scratch struct {
+	left, right       mendoza.HashList
+	leftIdx, rightIdx mendoza.HashIndex
+}
+
+var scratchPool = sync.Pool{New: func() interface{} { return new(scratch) }}
+
+func getScratch() *scratch { return scratchPool.Get().(*scratch) }
+
+func putScratch(s *scratch) {
+	s.left.Reset(nil)
+	s.right.Reset(nil)
+	scratchPool.Put(s)
+}
 
 type differ struct {
 	left      *mendoza.HashList
@@ -36,20 +55,21 @@ func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
 		return Patch{&OpValue{right}}, nil
 	}
 
-	leftList, err := mendoza.HashListFor(left, options.convertFunc)
-	if err != nil {
+	sc := getScratch()
+	defer putScratch(sc)
+	if err := sc.left.Fill(left, options.convertFunc); err != nil {
 		return nil, err
 	}
-	rightList, err := mendoza.HashListFor(right, options.convertFunc)
-	if err != nil {
+	if err := sc.right.Fill(right, options.convertFunc); err != nil {
 		return nil, err
 	}
 
-	hashIndex := mendoza.NewHashIndex(leftList)
+	sc.leftIdx.Build(&sc.left)
 	differ := differ{
-		left:      leftList,
-		right:     rightList,
-		hashIndex: hashIndex,
+		left:      &sc.left,
+		right:     &sc.right,
+		hashIndex: &sc.leftIdx,
+		options:   options,
 	}
 	return differ.build(), nil
 }
@@ -69,16 +89,18 @@ func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch
 		return Patch{&OpValue{nil}}, Patch{&OpValue{left}}, nil
 	}
 
-	leftList, err := mendoza.HashListFor(left, options.convertFunc)
-	if err != nil {
+	sc := getScratch()
+	defer putScratch(sc)
+	if err := sc.left.Fill(left, options.convertFunc); err != nil {
 		return nil, nil, err
 	}
-	rightList, err := mendoza.HashListFor(right, options.convertFunc)
-	if err != nil {
+	if err := sc.right.Fill(right, options.convertFunc); err != nil {
 		return nil, nil, err
 	}
+	leftList, rightList := &sc.left, &sc.right
 
-	leftHashIndex := mendoza.NewHashIndex(leftList)
+	sc.leftIdx.Build(leftList)
+	leftHashIndex := &sc.leftIdx
 	leftDiffer := differ{
 		left:      leftList,
 		right:     rightList,
@@ -86,7 +108,8 @@ func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch
 		options:   options,
 	}
 
-	rightHashIndex := mendoza.NewHashIndex(rightList)
+	sc.rightIdx.Build(rightList)
+	rightHashIndex := &sc.rightIdx
 	rightDiffer := differ{
 		left:      rightList,
 		right:     leftList,
@@ -357,7 +380,11 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 		xorHash := entry.XorHash
 		xorHash.Xor(fieldEntry.Hash)
 
-		for _, otherIdx := range d.hashIndex.XorData[xorHash] {
+		for ci := d.hashIndex.LookupXor(xorHash); ; {
+			otherIdx, ok := ci.Next()
+			if !ok {
+				break
+			}
 			otherEntry := d.left.Entries[otherIdx]
 
 			for i, req := range reqs {
@@ -374,7 +401,11 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 		fieldEntry := it.GetEntry()
 		fieldRequests = append(fieldRequests, nil)
 
-		for _, otherIdx := range d.hashIndex.Data[fieldEntry.Hash] {
+		for ci := d.hashIndex.Lookup(fieldEntry.Hash); ; {
+			otherIdx, ok := ci.Next()
+			if !ok {
+				break
+			}
 			otherEntry := d.left.Entries[otherIdx]
 
 			for candIdx := range candidates {
@@ -617,7 +648,11 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		elementEntry := it.GetEntry()
 		elementRequests = append(elementRequests, nil)
 
-		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
+		for ci := d.hashIndex.Lookup(elementEntry.Hash); ; {
+			otherIdx, ok := ci.Next()
+			if !ok {
+				break
+			}
 			otherEntry := d.left.Entries[otherIdx]
 
 			for candIdx := range candidates {
