@@ -7,16 +7,16 @@ import (
 )
 
 // Differ creates patches. It owns all of the memory needed for diffing, so once its buffers have grown to fit
-// the documents, Diff, DiffDouble, WriteTo and WriteReverseTo don't allocate.
+// the documents, diffing and writing the result doesn't allocate.
 //
 // A Differ is not safe for concurrent use. It keeps references to the last documents it was given until the next
 // call.
 type Differ struct {
-	options               Options
-	left, right           mendoza.HashList
-	leftIndex, rightIndex mendoza.HashIndex
-	differ                differ
-	patch, reversePatch   span
+	options             Options
+	left, right         mendoza.HashList
+	hashIndex           mendoza.HashIndex
+	differ              differ
+	patch, reversePatch span
 }
 
 // NewDiffer creates a Differ which uses the default options.
@@ -92,8 +92,8 @@ func (d *Differ) Diff(left, right interface{}) error {
 		return err
 	}
 
-	d.leftIndex.Build(&d.left)
-	d.patch = d.differ.build(&d.left, &d.right, &d.leftIndex)
+	d.hashIndex.Build(&d.left)
+	d.patch = d.differ.build(&d.left, &d.right, &d.hashIndex)
 	return nil
 }
 
@@ -117,11 +117,11 @@ func (d *Differ) DiffDouble(left, right interface{}) error {
 		return err
 	}
 
-	d.leftIndex.Build(&d.left)
-	d.patch = d.differ.build(&d.left, &d.right, &d.leftIndex)
+	d.hashIndex.Build(&d.left)
+	d.patch = d.differ.build(&d.left, &d.right, &d.hashIndex)
 
-	d.rightIndex.Build(&d.right)
-	d.reversePatch = d.differ.build(&d.right, &d.left, &d.rightIndex)
+	d.hashIndex.Build(&d.right)
+	d.reversePatch = d.differ.build(&d.right, &d.left, &d.hashIndex)
 	return nil
 }
 
@@ -209,14 +209,13 @@ type differ struct {
 
 	tape []opRec
 
-	reqs   []request
-	pend   []pendingRequest
+	reqs []request
+	// ranges records where each field's requests start in reqs; see fieldRequests.
 	ranges []int
 
-	mapCandidates   []mapCandidate
-	mapAliases      []mapAlias
-	sliceCandidates []sliceCandidate
-	sliceAliases    []sliceAlias
+	candidates   []candidate
+	mapAliases   []mapAlias
+	sliceAliases []sliceAlias
 }
 
 func (d *differ) reset() {
@@ -231,11 +230,9 @@ func (d *differ) reset() {
 
 	d.tape = d.tape[:0]
 	d.reqs = d.reqs[:0]
-	d.pend = d.pend[:0]
 	d.ranges = d.ranges[:0]
-	d.mapCandidates = d.mapCandidates[:0]
+	d.candidates = d.candidates[:0]
 	d.mapAliases = d.mapAliases[:0]
-	d.sliceCandidates = d.sliceCandidates[:0]
 	d.sliceAliases = d.sliceAliases[:0]
 }
 
@@ -297,50 +294,9 @@ func (req *request) update(patch span, size int, outputKey string) {
 	}
 }
 
-// pendingRequest is a request for a field/element which has not yet been placed in d.reqs.
-type pendingRequest struct {
-	field int
-	req   request
-}
-
-// placeRequests moves the pending requests d.pend[pendMark:] into d.reqs, grouped by field (keeping their
-// order), so that each field's requests can be passed to reconstruct as one span. It returns the offset in
-// d.ranges to pass to fieldRequests.
-func (d *differ) placeRequests(pendMark int, fieldCount int) int {
-	pending := d.pend[pendMark:]
-	offset := len(d.ranges)
-
-	// Count the requests per field and turn the counts into start indices.
-	for i := 0; i <= fieldCount; i++ {
-		d.ranges = append(d.ranges, 0)
-	}
-	for _, p := range pending {
-		d.ranges[offset+p.field+1]++
-	}
-	d.ranges[offset] = len(d.reqs)
-	for i := 1; i <= fieldCount; i++ {
-		d.ranges[offset+i] += d.ranges[offset+i-1]
-	}
-
-	// Copy each request to the next free slot of its field, using a temporary cursor per field.
-	for i := 0; i < fieldCount; i++ {
-		d.ranges = append(d.ranges, d.ranges[offset+i])
-	}
-	cursors := d.ranges[offset+fieldCount+1:]
-	for range pending {
-		d.reqs = append(d.reqs, request{})
-	}
-	for _, p := range pending {
-		d.reqs[cursors[p.field]] = p.req
-		cursors[p.field]++
-	}
-	d.ranges = d.ranges[:offset+fieldCount+1]
-
-	d.pend = d.pend[:pendMark]
-	return offset
-}
-
-// fieldRequests returns the span in d.reqs holding the requests for a field, as placed by placeRequests.
+// fieldRequests returns the requests for a field. The requests are built one field at a time, and before each field
+// the start of its requests in d.reqs is appended to d.ranges (and after the last field, the end). offset is the
+// length of d.ranges before the first field.
 func (d *differ) fieldRequests(offset int, field int) span {
 	return span{d.ranges[offset+field], d.ranges[offset+field+1]}
 }
@@ -422,12 +378,15 @@ In this case the 2 recursive calls are as follows:
 
 */
 
-// This stores information about each candidate map in the left-side document.
-type mapCandidate struct {
+// This stores information about each candidate map/slice in the left-side document.
+type candidate struct {
 	contextIdx int
 	requestIdx int
-	// aliases is the offset in d.mapAliases of this candidate's aliases: one per field in the target.
+	// aliases is the offset in d.mapAliases or d.sliceAliases of this candidate's aliases: one per field/element in
+	// the target.
 	aliases int
+	// contextIter walks the candidate's fields/elements while the requests are built.
+	contextIter mendoza.Iter
 }
 
 type mapAlias struct {
@@ -437,21 +396,22 @@ type mapAlias struct {
 }
 
 func (d *differ) addMapCandidate(contextIdx int, requestIdx int, fieldCount int) {
-	d.mapCandidates = append(d.mapCandidates, mapCandidate{
-		contextIdx: contextIdx,
-		requestIdx: requestIdx,
-		aliases:    len(d.mapAliases),
+	d.candidates = append(d.candidates, candidate{
+		contextIdx:  contextIdx,
+		requestIdx:  requestIdx,
+		aliases:     len(d.mapAliases),
+		contextIter: d.left.Iter(contextIdx),
 	})
 	for i := 0; i < fieldCount; i++ {
 		d.mapAliases = append(d.mapAliases, mapAlias{})
 	}
 }
 
-func (d *differ) mapAlias(cand *mapCandidate, target mendoza.Reference) *mapAlias {
+func (d *differ) mapAlias(cand *candidate, target mendoza.Reference) *mapAlias {
 	return &d.mapAliases[cand.aliases+target.Index]
 }
 
-func (d *differ) insertMapAlias(cand *mapCandidate, target mendoza.Reference, source mendoza.Reference) {
+func (d *differ) insertMapAlias(cand *candidate, target mendoza.Reference, source mendoza.Reference) {
 	current := d.mapAlias(cand, target)
 
 	if target.Key == source.Key {
@@ -523,7 +483,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 
 	// Everything appended to these is removed again before returning.
 	reqsMark := len(d.reqs)
-	candidatesMark := len(d.mapCandidates)
+	candidatesMark := len(d.candidates)
 	aliasesMark := len(d.mapAliases)
 	rangesMark := len(d.ranges)
 
@@ -561,7 +521,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		}
 	}
 
-	candidates := span{candidatesMark, len(d.mapCandidates)}
+	candidates := span{candidatesMark, len(d.candidates)}
 
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		fieldEntry := it.GetEntry()
@@ -574,7 +534,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 			otherEntry := &d.left.Entries[otherIdx]
 
 			for c := candidates.start; c < candidates.end; c++ {
-				cand := &d.mapCandidates[c]
+				cand := &d.candidates[c]
 				if cand.contextIdx == otherEntry.Parent {
 					d.insertMapAlias(cand, fieldEntry.Reference, otherEntry.Reference)
 				}
@@ -582,15 +542,16 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		}
 	}
 
-	// Now build the requests
-	pendMark := len(d.pend)
-	for c := candidates.start; c < candidates.end; c++ {
-		cand := &d.mapCandidates[c]
-		contextIter := d.left.Iter(cand.contextIdx)
+	// Now build the requests, one field at a time
+	fieldRequests := len(d.ranges)
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		fieldEntry := it.GetEntry()
+		fieldKey := fieldEntry.Reference.Key
+		d.ranges = append(d.ranges, len(d.reqs))
 
-		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-			fieldEntry := it.GetEntry()
-			fieldKey := fieldEntry.Reference.Key
+		for c := candidates.start; c < candidates.end; c++ {
+			cand := &d.candidates[c]
+			contextIter := &cand.contextIter
 
 			if !d.mapAlias(cand, fieldEntry.Reference).ok {
 				for !contextIter.IsDone() {
@@ -601,13 +562,10 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 					}
 
 					if key == fieldKey {
-						d.pend = append(d.pend, pendingRequest{
-							field: fieldEntry.Reference.Index,
-							req: request{
-								contextIdx: cand.contextIdx,
-								primaryIdx: contextIter.GetIndex(),
-								size:       fieldEntry.Size + 1,
-							},
+						d.reqs = append(d.reqs, request{
+							contextIdx: cand.contextIdx,
+							primaryIdx: contextIter.GetIndex(),
+							size:       fieldEntry.Size + 1,
 						})
 						break
 					}
@@ -617,14 +575,14 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 			}
 		}
 	}
-	fieldRequests := d.placeRequests(pendMark, fieldCount)
+	d.ranges = append(d.ranges, len(d.reqs))
 
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		d.reconstruct(it.GetIndex(), d.fieldRequests(fieldRequests, it.GetEntry().Reference.Index))
 	}
 
 	for c := candidates.start; c < candidates.end; c++ {
-		cand := &d.mapCandidates[c]
+		cand := &d.candidates[c]
 		primaryIdx := cand.contextIdx
 
 		size := 0
@@ -715,7 +673,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 	}
 
 	d.reqs = d.reqs[:reqsMark]
-	d.mapCandidates = d.mapCandidates[:candidatesMark]
+	d.candidates = d.candidates[:candidatesMark]
 	d.mapAliases = d.mapAliases[:aliasesMark]
 	d.ranges = d.ranges[:rangesMark]
 }
@@ -727,18 +685,11 @@ type sliceAlias struct {
 	nextIsAdjacent bool
 }
 
-type sliceCandidate struct {
-	contextIdx int
-	requestIdx int
-	// aliases is the offset in d.sliceAliases of this candidate's aliases: one per element in the target.
-	aliases int
-}
-
-func (d *differ) sliceAlias(cand *sliceCandidate, pos int) *sliceAlias {
+func (d *differ) sliceAlias(cand *candidate, pos int) *sliceAlias {
 	return &d.sliceAliases[cand.aliases+pos]
 }
 
-func (d *differ) insertSliceAlias(cand *sliceCandidate, target mendoza.Reference, source mendoza.Reference) {
+func (d *differ) insertSliceAlias(cand *candidate, target mendoza.Reference, source mendoza.Reference) {
 	// We assume here that you'll only invoke this method in the same order
 	// as you want to build the array.
 
@@ -792,7 +743,7 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 
 	// Everything appended to these is removed again before returning.
 	reqsMark := len(d.reqs)
-	candidatesMark := len(d.sliceCandidates)
+	candidatesMark := len(d.candidates)
 	aliasesMark := len(d.sliceAliases)
 	rangesMark := len(d.ranges)
 
@@ -802,17 +753,18 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 			continue
 		}
 
-		d.sliceCandidates = append(d.sliceCandidates, sliceCandidate{
-			contextIdx: req.primaryIdx,
-			requestIdx: i,
-			aliases:    len(d.sliceAliases),
+		d.candidates = append(d.candidates, candidate{
+			contextIdx:  req.primaryIdx,
+			requestIdx:  i,
+			aliases:     len(d.sliceAliases),
+			contextIter: d.left.Iter(req.primaryIdx),
 		})
 		for j := 0; j < elementCount; j++ {
 			d.sliceAliases = append(d.sliceAliases, sliceAlias{})
 		}
 	}
 
-	candidates := span{candidatesMark, len(d.sliceCandidates)}
+	candidates := span{candidatesMark, len(d.candidates)}
 
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		elementEntry := it.GetEntry()
@@ -825,7 +777,7 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 			otherEntry := &d.left.Entries[otherIdx]
 
 			for c := candidates.start; c < candidates.end; c++ {
-				cand := &d.sliceCandidates[c]
+				cand := &d.candidates[c]
 				if cand.contextIdx == otherEntry.Parent {
 					d.insertSliceAlias(cand, elementEntry.Reference, otherEntry.Reference)
 				}
@@ -833,41 +785,39 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 		}
 	}
 
-	// Now build the requests
-	pendMark := len(d.pend)
-	for c := candidates.start; c < candidates.end; c++ {
-		cand := &d.sliceCandidates[c]
-		contextIter := d.left.Iter(cand.contextIdx)
+	// Now build the requests, one element at a time
+	elementRequests := len(d.ranges)
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		elementEntry := it.GetEntry()
+		d.ranges = append(d.ranges, len(d.reqs))
 
-		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		for c := candidates.start; c < candidates.end; c++ {
+			cand := &d.candidates[c]
+			contextIter := &cand.contextIter
+
 			if contextIter.IsDone() {
-				break
+				continue
 			}
 
-			elementEntry := it.GetEntry()
-
 			if !d.sliceAlias(cand, elementEntry.Reference.Index).ok {
-				d.pend = append(d.pend, pendingRequest{
-					field: elementEntry.Reference.Index,
-					req: request{
-						contextIdx: cand.contextIdx,
-						primaryIdx: contextIter.GetIndex(),
-						size:       elementEntry.Size + 1,
-					},
+				d.reqs = append(d.reqs, request{
+					contextIdx: cand.contextIdx,
+					primaryIdx: contextIter.GetIndex(),
+					size:       elementEntry.Size + 1,
 				})
 			}
 
 			contextIter.Next()
 		}
 	}
-	elementRequests := d.placeRequests(pendMark, elementCount)
+	d.ranges = append(d.ranges, len(d.reqs))
 
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		d.reconstruct(it.GetIndex(), d.fieldRequests(elementRequests, it.GetEntry().Reference.Index))
 	}
 
 	for c := candidates.start; c < candidates.end; c++ {
-		cand := &d.sliceCandidates[c]
+		cand := &d.candidates[c]
 		contextIdx := cand.contextIdx
 		size := 0
 		patchStart := len(d.tape)
@@ -925,7 +875,7 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 	}
 
 	d.reqs = d.reqs[:reqsMark]
-	d.sliceCandidates = d.sliceCandidates[:candidatesMark]
+	d.candidates = d.candidates[:candidatesMark]
 	d.sliceAliases = d.sliceAliases[:aliasesMark]
 	d.ranges = d.ranges[:rangesMark]
 }
