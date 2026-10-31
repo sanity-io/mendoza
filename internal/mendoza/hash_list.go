@@ -2,7 +2,7 @@ package mendoza
 
 import (
 	"fmt"
-	"slices"
+	"sort"
 )
 
 // HashList stores a document as a flat list of entries. Each entry contains a hash of its contents, allowing you
@@ -10,15 +10,9 @@ import (
 type HashList struct {
 	Entries     []HashEntry
 	convertFunc func(value interface{}) interface{}
-	keyBuf      []string // scratch stack for sorted keys, reused across documents
-}
 
-// Reset prepares the list for reuse while keeping its backing arrays.
-func (hashList *HashList) Reset(convertFunc func(value interface{}) interface{}) {
-	clear(hashList.Entries) // drop references so the GC can reclaim old documents
-	hashList.Entries = hashList.Entries[:0]
-	hashList.keyBuf = hashList.keyBuf[:0]
-	hashList.convertFunc = convertFunc
+	// keys is a stack of sorted map keys, reused across maps (and documents) to avoid allocating.
+	keys []string
 }
 
 func HashListFor(doc interface{}, convertFunc func(value interface{}) interface{}) (*HashList, error) {
@@ -30,10 +24,26 @@ func HashListFor(doc interface{}, convertFunc func(value interface{}) interface{
 	return hashList, nil
 }
 
-// Fill resets the list and hashes doc into it, reusing existing capacity.
+// Fill replaces the contents of the list with doc, reusing the memory of the previous document.
 func (hashList *HashList) Fill(doc interface{}, convertFunc func(value interface{}) interface{}) error {
-	hashList.Reset(convertFunc)
+	hashList.Reset()
+	hashList.convertFunc = convertFunc
 	return hashList.AddDocument(doc)
+}
+
+// Reset empties the list, keeping its memory but dropping all references to the previous document.
+func (hashList *HashList) Reset() {
+	for i := range hashList.Entries {
+		hashList.Entries[i] = HashEntry{}
+	}
+	hashList.Entries = hashList.Entries[:0]
+	hashList.convertFunc = nil
+
+	// The stack is normally empty already, but not if the previous document failed with an error.
+	for i := range hashList.keys {
+		hashList.keys[i] = ""
+	}
+	hashList.keys = hashList.keys[:0]
 }
 
 type Reference struct {
@@ -108,20 +118,20 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 		result = HashString(obj)
 		size = len(obj) + 1
 	case map[string]interface{}:
-		hasher := NewMapHasher()
-		base := len(hashList.keyBuf)
+		hasher := HasherMap
+
+		// The keys are pushed onto the shared stack. Index into it rather than holding a sub-slice since the
+		// recursive calls below may grow (and reallocate) it.
+		keysStart := len(hashList.keys)
 		for key := range obj {
-			hashList.keyBuf = append(hashList.keyBuf, key)
+			hashList.keys = append(hashList.keys, key)
 		}
-		slices.Sort(hashList.keyBuf[base:])
-		keys := hashList.keyBuf[base:]
+		sort.Strings(hashList.keys[keysStart:])
 
 		prevIdx := -1
 
-		_ = keys
-		n := len(hashList.keyBuf) - base
-		for idx := 0; idx < n; idx++ {
-			key := hashList.keyBuf[base+idx]
+		for idx := 0; idx < len(obj); idx++ {
+			key := hashList.keys[keysStart+idx]
 			value := obj[key]
 			entryIdx := len(hashList.Entries)
 			valueHash, valueSize, err := hashList.process(current, MapEntryReference(idx, key), value)
@@ -142,11 +152,14 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 			xorHash.Xor(valueHash)
 		}
 
-		clear(hashList.keyBuf[base:])
-		hashList.keyBuf = hashList.keyBuf[:base]
+		for i := keysStart; i < len(hashList.keys); i++ {
+			hashList.keys[i] = ""
+		}
+		hashList.keys = hashList.keys[:keysStart]
+
 		result = hasher.Sum()
 	case []interface{}:
-		hasher := NewSliceHasher()
+		hasher := HasherSlice
 
 		prevIdx := -1
 

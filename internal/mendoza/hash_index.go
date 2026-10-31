@@ -1,78 +1,100 @@
 package mendoza
 
-// HashIndex maps a hash to the ascending list of entry indices with that hash.
-// Lists are stored as intrusive chains in one node slice, so building the
-// index allocates nothing once the maps and slice have grown (it is reusable).
+// HashIndex maps a hash to the entries with that hash, in ascending order.
+//
+// Each list is stored as a linked chain in a shared node slice instead of as a
+// []int per hash. This lets Build reuse all of its memory when the index is
+// rebuilt for another document.
 type HashIndex struct {
-	XorData map[Hash]chain
+	data    map[Hash]chain
+	xorData map[Hash]chain
 	nodes   []node
 }
 
-type chain struct{ head, tail int32 }
-type node struct{ idx, next int32 }
+type chain struct{ head, tail int }
+type node struct{ idx, next int }
 
 func NewHashIndex(hashList *HashList) *HashIndex {
-	h := &HashIndex{}
-	h.Build(hashList)
-	return h
+	hashIndex := &HashIndex{}
+	hashIndex.Build(hashList)
+	return hashIndex
 }
 
-func push[K comparable](h *HashIndex, m map[K]chain, key K, idx int) {
-	n := int32(len(h.nodes))
-	h.nodes = append(h.nodes, node{idx: int32(idx), next: -1})
-	if c, ok := m[key]; ok {
-		h.nodes[c.tail].next = n
-		c.tail = n
-		m[key] = c
-	} else {
-		m[key] = chain{n, n}
+// Build (re)builds the index for hashList, reusing the memory of any previous build.
+func (hashIndex *HashIndex) Build(hashList *HashList) {
+	if hashIndex.data == nil {
+		hashIndex.data = map[Hash]chain{}
+		hashIndex.xorData = map[Hash]chain{}
 	}
-}
-
-func (h *HashIndex) Build(hashList *HashList) {
-	if h.XorData == nil {
-		h.XorData = make(map[Hash]chain, len(hashList.Entries))
-	} else {
-		clear(h.XorData)
+	for key := range hashIndex.data {
+		delete(hashIndex.data, key)
 	}
-	h.nodes = h.nodes[:0]
+	for key := range hashIndex.xorData {
+		delete(hashIndex.xorData, key)
+	}
+	hashIndex.nodes = hashIndex.nodes[:0]
 
 	for idx := range hashList.Entries {
 		entry := &hashList.Entries[idx]
+		hashIndex.push(hashIndex.data, entry.Hash, idx)
 
 		if !entry.XorHash.IsNull() {
 			for it := hashList.Iter(idx); !it.IsDone(); it.Next() {
 				xorHash := entry.XorHash
-				xorHash.Xor(hashList.Entries[it.idx].Hash)
-				if c, ok := h.XorData[xorHash]; ok && h.nodes[c.tail].idx == int32(idx) {
-					continue // already present
+				xorHash.Xor(it.GetEntry().Hash)
+
+				if current, ok := hashIndex.xorData[xorHash]; ok && hashIndex.nodes[current.tail].idx == idx {
+					// Already present.
+					continue
 				}
-				push(h, h.XorData, xorHash, idx)
+
+				hashIndex.push(hashIndex.xorData, xorHash, idx)
 			}
 		}
 	}
 }
 
-// ChainIter walks the entry indices for one hash in ascending order.
-type ChainIter struct {
-	nodes []node
-	cur   int32
+func (hashIndex *HashIndex) push(m map[Hash]chain, key Hash, idx int) {
+	n := len(hashIndex.nodes)
+	hashIndex.nodes = append(hashIndex.nodes, node{idx: idx, next: -1})
+	if current, ok := m[key]; ok {
+		hashIndex.nodes[current.tail].next = n
+		current.tail = n
+		m[key] = current
+	} else {
+		m[key] = chain{head: n, tail: n}
+	}
 }
 
-func (h *HashIndex) LookupXor(key Hash) ChainIter { return iter(h, h.XorData, key) }
+// Lookup returns the entries whose hash is key.
+func (hashIndex *HashIndex) Lookup(key Hash) ChainIter {
+	return hashIndex.iter(hashIndex.data, key)
+}
 
-func iter[K comparable](h *HashIndex, m map[K]chain, key K) ChainIter {
-	if c, ok := m[key]; ok {
-		return ChainIter{h.nodes, c.head}
+// LookupXor returns the entries which have a field that, when removed, makes their XorHash equal to key.
+func (hashIndex *HashIndex) LookupXor(key Hash) ChainIter {
+	return hashIndex.iter(hashIndex.xorData, key)
+}
+
+func (hashIndex *HashIndex) iter(m map[Hash]chain, key Hash) ChainIter {
+	if current, ok := m[key]; ok {
+		return ChainIter{nodes: hashIndex.nodes, cur: current.head}
 	}
 	return ChainIter{cur: -1}
 }
 
+// ChainIter iterates over the entry indices returned by a lookup.
+type ChainIter struct {
+	nodes []node
+	cur   int
+}
+
+// Next returns the next entry index, or false when there are no more.
 func (it *ChainIter) Next() (int, bool) {
 	if it.cur < 0 {
 		return 0, false
 	}
 	n := it.nodes[it.cur]
 	it.cur = n.next
-	return int(n.idx), true
+	return n.idx, true
 }

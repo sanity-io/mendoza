@@ -1,6 +1,6 @@
 module github.com/sanity-io/mendoza
 
-go 1.21
+go 1.13
 
 require (
 	github.com/stretchr/objx v0.2.0 // indirect

@@ -75,13 +75,6 @@ func mutate(r *rand.Rand, v interface{}, depth int) interface{} {
 	return v
 }
 
-func norm(v interface{}) interface{} {
-	b, _ := json.Marshal(v)
-	var o interface{}
-	json.Unmarshal(b, &o)
-	return o
-}
-
 func TestRandomRoundtrip(t *testing.T) {
 	r := rand.New(rand.NewSource(1))
 	for i := 0; i < 50000; i++ {

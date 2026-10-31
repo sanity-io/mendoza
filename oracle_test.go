@@ -1,54 +1,23 @@
 package mendoza
 
-import (
-	"sync"
-	"unicode/utf8"
+// This file is a copy of the differ as it was before it was made allocation-free (differ.go and
+// internal/mendoza/hash_index.go at 74ad574), with identifiers prefixed by "oracle". The tests use it to check that
+// the new differ produces exactly the same patches. Don't change it, other than to keep it compiling.
 
+import (
 	"github.com/sanity-io/mendoza/internal/mendoza"
+	"unicode/utf8"
 )
 
-// oScratch holds the per-call working memory of the oDiffer. It is pooled so that
-// steady-state diffing does not re-grow entry slices, maps and key buffers.
-type oScratch struct {
-	left, right       mendoza.HashList
-	leftIdx, rightIdx mendoza.HashIndex
-}
-
-var oScratchPool = sync.Pool{New: func() interface{} { return new(oScratch) }}
-
-func oGetScratch() *oScratch { return oScratchPool.Get().(*oScratch) }
-
-func oPutScratch(s *oScratch) {
-	s.left.Reset(nil)
-	s.right.Reset(nil)
-	oScratchPool.Put(s)
-}
-
-type oDiffer struct {
+type oracleDiffer struct {
 	left      *mendoza.HashList
 	right     *mendoza.HashList
-	hashIndex *mendoza.HashIndex
+	hashIndex *oracleHashIndex
 	options   *Options
-	globalIdx map[mendoza.Hash][]int
 }
 
 // Creates a patch which can be applied to the left document to produce the right document.
-//
-// This function uses the default options.
-func oCreatePatchDefault(left, right interface{}) (Patch, error) {
-	return oCreatePatch(&DefaultOptions, left, right)
-}
-
-// Creates two patches: The first can be applied to the left document to produce the right document,
-// the second can be applied to the right document to produce the left document.
-//
-// This function uses the default options.
-func oCreateDoublePatchDefault(left, right interface{}) (Patch, Patch, error) {
-	return oCreateDoublePatch(&DefaultOptions, left, right)
-}
-
-// Creates a patch which can be applied to the left document to produce the right document.
-func oCreatePatch(options *Options, left, right interface{}) (Patch, error) {
+func oracleCreatePatch(options *Options, left, right interface{}) (Patch, error) {
 	if left == nil {
 		if right == nil {
 			return Patch{}, nil
@@ -56,28 +25,27 @@ func oCreatePatch(options *Options, left, right interface{}) (Patch, error) {
 		return Patch{&OpValue{right}}, nil
 	}
 
-	sc := oGetScratch()
-	defer oPutScratch(sc)
-	if err := sc.left.Fill(left, options.convertFunc); err != nil {
+	leftList, err := mendoza.HashListFor(left, options.convertFunc)
+	if err != nil {
 		return nil, err
 	}
-	if err := sc.right.Fill(right, options.convertFunc); err != nil {
+	rightList, err := mendoza.HashListFor(right, options.convertFunc)
+	if err != nil {
 		return nil, err
 	}
 
-	sc.leftIdx.Build(&sc.left)
-	oDiffer := oDiffer{
-		left:      &sc.left,
-		right:     &sc.right,
-		hashIndex: &sc.leftIdx,
-		options:   options,
+	hashIndex := newOracleHashIndex(leftList)
+	oracleDiffer := oracleDiffer{
+		left:      leftList,
+		right:     rightList,
+		hashIndex: hashIndex,
 	}
-	return oDiffer.build(), nil
+	return oracleDiffer.build(), nil
 }
 
 // Creates two patches: The first can be applied to the left document to produce the right document,
 // the second can be applied to the right document to produce the left document.
-func oCreateDoublePatch(options *Options, left, right interface{}) (Patch, Patch, error) {
+func oracleCreateDoublePatch(options *Options, left, right interface{}) (Patch, Patch, error) {
 	if left == nil && right == nil {
 		return Patch{}, Patch{}, nil
 	}
@@ -90,28 +58,25 @@ func oCreateDoublePatch(options *Options, left, right interface{}) (Patch, Patch
 		return Patch{&OpValue{nil}}, Patch{&OpValue{left}}, nil
 	}
 
-	sc := oGetScratch()
-	defer oPutScratch(sc)
-	if err := sc.left.Fill(left, options.convertFunc); err != nil {
+	leftList, err := mendoza.HashListFor(left, options.convertFunc)
+	if err != nil {
 		return nil, nil, err
 	}
-	if err := sc.right.Fill(right, options.convertFunc); err != nil {
+	rightList, err := mendoza.HashListFor(right, options.convertFunc)
+	if err != nil {
 		return nil, nil, err
 	}
-	leftList, rightList := &sc.left, &sc.right
 
-	sc.leftIdx.Build(leftList)
-	leftHashIndex := &sc.leftIdx
-	leftDiffer := oDiffer{
+	leftHashIndex := newOracleHashIndex(leftList)
+	leftDiffer := oracleDiffer{
 		left:      leftList,
 		right:     rightList,
 		hashIndex: leftHashIndex,
 		options:   options,
 	}
 
-	sc.rightIdx.Build(rightList)
-	rightHashIndex := &sc.rightIdx
-	rightDiffer := oDiffer{
+	rightHashIndex := newOracleHashIndex(rightList)
+	rightDiffer := oracleDiffer{
 		left:      rightList,
 		right:     leftList,
 		hashIndex: rightHashIndex,
@@ -122,12 +87,12 @@ func oCreateDoublePatch(options *Options, left, right interface{}) (Patch, Patch
 
 /*
 
-The main function in the oDiffer is `reconstruct` which takes two parameters.
+The main function in the oracleDiffer is `reconstruct` which takes two parameters.
 The first is the target value: a reference to a value in the right-hand side.
-The second parameter is a slice of _requests_. A oRequest has an _initial
+The second parameter is a slice of _requests_. A oracleRequest has an _initial
 context_ which is a reference to a value in the left-hand side. The goal of
-`reconstruct` is then, for each oRequest, build a patch which converts the
-_initial context_ into the target value.  Every oRequest also keeps track of the
+`reconstruct` is then, for each oracleRequest, build a patch which converts the
+_initial context_ into the target value.  Every oracleRequest also keeps track of the
 _best size_.
 
 For arrays/objects this is done in a few steps:
@@ -138,7 +103,7 @@ For arrays/objects this is done in a few steps:
 
 2. Then we do filtering of candidates based on the requests' context:
    - Currently we only care about candidates that are direct children of the context.
-   - Per oRequest we pick the N best candidates to explore. This is just an heuristic because we only know
+   - Per oracleRequest we pick the N best candidates to explore. This is just an heuristic because we only know
      "how many fields/elements they have in common" and nothing about the size of representing the patch of
      the differences.
 
@@ -147,22 +112,11 @@ For arrays/objects this is done in a few steps:
    we'll have in this step, and the time complexity will be higher.
 
 4. At this point we know have full information about each candidate: All patches are calculated.
-   We then just need to connect each candidate with a oRequest and we're done!
+   We then just need to connect each candidate with a oracleRequest and we're done!
 
 */
 
-// global is the oracle's own hash -> entries index (ascending), as in upstream.
-func (d *oDiffer) global(h mendoza.Hash) []int {
-	if d.globalIdx == nil {
-		d.globalIdx = map[mendoza.Hash][]int{}
-		for i := range d.left.Entries {
-			d.globalIdx[d.left.Entries[i].Hash] = append(d.globalIdx[d.left.Entries[i].Hash], i)
-		}
-	}
-	return d.globalIdx[h]
-}
-
-func (d *oDiffer) build() Patch {
+func (d *oracleDiffer) build() Patch {
 	root := d.right.Entries[0]
 
 	if d.left.Entries[0].Hash == root.Hash {
@@ -170,7 +124,7 @@ func (d *oDiffer) build() Patch {
 		return Patch{}
 	}
 
-	reqs := []oRequest{
+	reqs := []oracleRequest{
 		{
 			contextIdx: -1,
 			primaryIdx: 0,
@@ -189,7 +143,7 @@ func (d *oDiffer) build() Patch {
 	return req.patch
 }
 
-type oRequest struct {
+type oracleRequest struct {
 	contextIdx int
 	primaryIdx int
 	size       int
@@ -197,7 +151,7 @@ type oRequest struct {
 	outputKey  string
 }
 
-func (req *oRequest) update(patch Patch, size int, outputKey string) {
+func (req *oracleRequest) update(patch Patch, size int, outputKey string) {
 	if size < req.size {
 		req.patch = patch
 		req.size = size
@@ -205,7 +159,7 @@ func (req *oRequest) update(patch Patch, size int, outputKey string) {
 	}
 }
 
-func (d *oDiffer) reconstruct(idx int, reqs []oRequest) {
+func (d *oracleDiffer) reconstruct(idx int, reqs []oracleRequest) {
 	if len(reqs) == 0 {
 		return
 	}
@@ -228,7 +182,7 @@ func (d *oDiffer) reconstruct(idx int, reqs []oRequest) {
 	}
 }
 
-func (d *oDiffer) enterBlank(patch *Patch, idx int) {
+func (d *oracleDiffer) enterBlank(patch *Patch, idx int) {
 	if idx == 0 {
 		*patch = append(*patch, &OpBlank{})
 		return
@@ -248,7 +202,7 @@ func (d *oDiffer) enterBlank(patch *Patch, idx int) {
 	*patch = append(*patch, op)
 }
 
-func (d *oDiffer) enterCopy(patch *Patch, idx int) {
+func (d *oracleDiffer) enterCopy(patch *Patch, idx int) {
 	if idx == 0 {
 		// Root => Already on the stack.
 		return
@@ -291,32 +245,32 @@ In this case the 2 recursive calls are as follows:
 */
 
 // This stores information about each candidate map in the left-side document.
-type oMapCandidate struct {
-	alias      map[string]oMapAlias
+type oracleMapCandidate struct {
+	alias      map[string]oracleMapAlias
 	seenKeys   map[string]struct{}
 	requestIdx int
 	contextIdx int
 }
 
-type oMapAlias struct {
+type oracleMapAlias struct {
 	fieldIdx int
 	sameKey  bool
 }
 
-func (mc *oMapCandidate) init(contextIdx int, requestIdx int) {
-	mc.alias = make(map[string]oMapAlias)
+func (mc *oracleMapCandidate) init(contextIdx int, requestIdx int) {
+	mc.alias = make(map[string]oracleMapAlias)
 	mc.seenKeys = make(map[string]struct{})
 	mc.requestIdx = requestIdx
 	mc.contextIdx = contextIdx
 }
 
-func (mc *oMapCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
+func (mc *oracleMapCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
 	current, currentOk := mc.alias[target.Key]
 
 	mc.seenKeys[target.Key] = struct{}{}
 
 	if target.Key == source.Key {
-		mc.alias[target.Key] = oMapAlias{
+		mc.alias[target.Key] = oracleMapAlias{
 			fieldIdx: source.Index,
 			sameKey:  true,
 		}
@@ -335,24 +289,24 @@ func (mc *oMapCandidate) insertAlias(target mendoza.Reference, source mendoza.Re
 		}
 	}
 
-	mc.alias[target.Key] = oMapAlias{
+	mc.alias[target.Key] = oracleMapAlias{
 		fieldIdx: source.Index,
 		sameKey:  false,
 	}
 }
 
-func (mc *oMapCandidate) IsMissing(reference mendoza.Reference) bool {
+func (mc *oracleMapCandidate) IsMissing(reference mendoza.Reference) bool {
 	_, ok := mc.alias[reference.Key]
 	return !ok
 }
 
-func (mc *oMapCandidate) RegisterRequest(childIdx int, childRef mendoza.Reference, reqIdx int) {
+func (mc *oracleMapCandidate) RegisterRequest(childIdx int, childRef mendoza.Reference, reqIdx int) {
 	mc.seenKeys[childRef.Key] = struct{}{}
 }
 
-func (d *oDiffer) reconstructMap(idx int, reqs []oRequest) {
+func (d *oracleDiffer) reconstructMap(idx int, reqs []oracleRequest) {
 	// right-index -> list of requests
-	fieldRequests := [][]oRequest{}
+	fieldRequests := [][]oracleRequest{}
 
 	// The input here is a list of requests. Each requests has _context_ and _primary_ which looks like this:
 	//
@@ -371,37 +325,33 @@ func (d *oDiffer) reconstructMap(idx int, reqs []oRequest) {
 
 	// Currently we're only looking at primary.
 
-	candidates := make([]oMapCandidate, 0, len(reqs))
+	candidates := make([]oracleMapCandidate, 0, len(reqs))
 
 	for i, req := range reqs {
 		if !d.left.Entries[req.primaryIdx].IsNonEmptyMap() {
 			continue
 		}
 
-		cand := oMapCandidate{}
+		cand := oracleMapCandidate{}
 		cand.init(req.primaryIdx, i)
 		candidates = append(candidates, cand)
 	}
 
 	entry := d.right.Entries[idx]
 
-	// Use the xor-index to find fields that oDiffer a bit
+	// Use the xor-index to find fields that oracleDiffer a bit
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		fieldEntry := it.GetEntry()
 
 		xorHash := entry.XorHash
 		xorHash.Xor(fieldEntry.Hash)
 
-		for ci := d.hashIndex.LookupXor(xorHash); ; {
-			otherIdx, ok := ci.Next()
-			if !ok {
-				break
-			}
+		for _, otherIdx := range d.hashIndex.XorData[xorHash] {
 			otherEntry := d.left.Entries[otherIdx]
 
 			for i, req := range reqs {
 				if otherEntry.Parent == req.contextIdx && otherIdx != req.primaryIdx {
-					cand := oMapCandidate{}
+					cand := oracleMapCandidate{}
 					cand.init(otherIdx, i)
 					candidates = append(candidates, cand)
 				}
@@ -413,7 +363,7 @@ func (d *oDiffer) reconstructMap(idx int, reqs []oRequest) {
 		fieldEntry := it.GetEntry()
 		fieldRequests = append(fieldRequests, nil)
 
-		for _, otherIdx := range d.global(fieldEntry.Hash) {
+		for _, otherIdx := range d.hashIndex.Data[fieldEntry.Hash] {
 			otherEntry := d.left.Entries[otherIdx]
 
 			for candIdx := range candidates {
@@ -446,7 +396,7 @@ func (d *oDiffer) reconstructMap(idx int, reqs []oRequest) {
 
 					if key == fieldKey {
 						fieldReqs := fieldRequests[i]
-						fieldReqs = append(fieldReqs, oRequest{
+						fieldReqs = append(fieldReqs, oracleRequest{
 							contextIdx: cand.contextIdx,
 							primaryIdx: contextIter.GetIndex(),
 							size:       fieldEntry.Size + 1,
@@ -569,29 +519,29 @@ func (d *oDiffer) reconstructMap(idx int, reqs []oRequest) {
 	}
 }
 
-type oSliceRequestData struct {
-	candidates map[int]*oSliceCandidate
+type oracleSliceRequestData struct {
+	candidates map[int]*oracleSliceCandidate
 }
 
-type oSliceAlias struct {
+type oracleSliceAlias struct {
 	elementIdx     int
 	prevIsAdjacent bool
 	nextIsAdjacent bool
 }
 
-type oSliceCandidate struct {
-	alias      map[int]oSliceAlias
+type oracleSliceCandidate struct {
+	alias      map[int]oracleSliceAlias
 	requestIdx int
 	contextIdx int
 }
 
-func (sc *oSliceCandidate) init(contextIdx int, requestIdx int) {
-	sc.alias = map[int]oSliceAlias{}
+func (sc *oracleSliceCandidate) init(contextIdx int, requestIdx int) {
+	sc.alias = map[int]oracleSliceAlias{}
 	sc.requestIdx = requestIdx
 	sc.contextIdx = contextIdx
 }
 
-func (sc *oSliceCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
+func (sc *oracleSliceCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
 	// We assume here that you'll only invoke this method in the same order
 	// as you want to build the array.
 
@@ -605,7 +555,7 @@ func (sc *oSliceCandidate) insertAlias(target mendoza.Reference, source mendoza.
 	if prevSource, prevOk := sc.alias[target.Index-1]; prevOk {
 		if prevSource.elementIdx+1 == source.Index {
 			// This one is perfectly adjacent. Use it!
-			sc.alias[target.Index] = oSliceAlias{
+			sc.alias[target.Index] = oracleSliceAlias{
 				elementIdx:     source.Index,
 				prevIsAdjacent: true,
 			}
@@ -630,24 +580,24 @@ func (sc *oSliceCandidate) insertAlias(target mendoza.Reference, source mendoza.
 		return
 	}
 
-	sc.alias[target.Index] = oSliceAlias{
+	sc.alias[target.Index] = oracleSliceAlias{
 		elementIdx:     source.Index,
 		prevIsAdjacent: false,
 	}
 }
 
-func (d *oDiffer) reconstructSlice(idx int, reqs []oRequest) {
+func (d *oracleDiffer) reconstructSlice(idx int, reqs []oracleRequest) {
 	// right-index -> requests
-	elementRequests := [][]oRequest{}
+	elementRequests := [][]oracleRequest{}
 
-	candidates := make([]oSliceCandidate, 0, len(reqs))
+	candidates := make([]oracleSliceCandidate, 0, len(reqs))
 
 	for i, req := range reqs {
 		if !d.left.Entries[req.primaryIdx].IsNonEmptySlice() {
 			continue
 		}
 
-		cand := oSliceCandidate{}
+		cand := oracleSliceCandidate{}
 		cand.init(req.primaryIdx, i)
 		candidates = append(candidates, cand)
 	}
@@ -656,7 +606,7 @@ func (d *oDiffer) reconstructSlice(idx int, reqs []oRequest) {
 		elementEntry := it.GetEntry()
 		elementRequests = append(elementRequests, nil)
 
-		for _, otherIdx := range d.global(elementEntry.Hash) {
+		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
 			otherEntry := d.left.Entries[otherIdx]
 
 			for candIdx := range candidates {
@@ -682,7 +632,7 @@ func (d *oDiffer) reconstructSlice(idx int, reqs []oRequest) {
 
 			if _, ok := cand.alias[elementEntry.Reference.Index]; !ok {
 				elementReqs := elementRequests[i]
-				elementReqs = append(elementReqs, oRequest{
+				elementReqs = append(elementReqs, oracleRequest{
 					contextIdx: cand.contextIdx,
 					primaryIdx: contextIter.GetIndex(),
 					size:       elementEntry.Size + 1,
@@ -759,7 +709,7 @@ func (d *oDiffer) reconstructSlice(idx int, reqs []oRequest) {
 
 // String handling
 
-func oCommonPrefix(a, b string) int {
+func oracleCommonPrefix(a, b string) int {
 	i := 0
 	for i < len(a) && i < len(b) {
 		ar, size := utf8.DecodeRuneInString(a[i:])
@@ -772,7 +722,7 @@ func oCommonPrefix(a, b string) int {
 	return i
 }
 
-func oCommonSuffix(a, b string, prefix int) int {
+func oracleCommonSuffix(a, b string, prefix int) int {
 	i := 0
 	for i < len(a)-prefix && i < len(b)-prefix {
 		ar, size := utf8.DecodeLastRuneInString(a[:len(a)-i])
@@ -787,7 +737,7 @@ func oCommonSuffix(a, b string, prefix int) int {
 	return i
 }
 
-func (d *oDiffer) reconstructString(idx int, rightString string, reqs []oRequest) {
+func (d *oracleDiffer) reconstructString(idx int, rightString string, reqs []oracleRequest) {
 	for reqIdx, req := range reqs {
 		leftEntry := d.left.Entries[req.primaryIdx]
 
@@ -806,14 +756,14 @@ func (d *oDiffer) reconstructString(idx int, rightString string, reqs []oRequest
 		d.enterBlank(&patch, req.primaryIdx)
 		size += 2
 
-		prefix := oCommonPrefix(leftString, rightString)
+		prefix := oracleCommonPrefix(leftString, rightString)
 
 		if prefix > 0 {
 			patch = append(patch, &OpStringAppendSlice{0, prefix})
 			size += 3
 		}
 
-		suffix := oCommonSuffix(leftString, rightString, prefix)
+		suffix := oracleCommonSuffix(leftString, rightString, prefix)
 
 		mid := rightString[prefix : len(rightString)-suffix]
 		if len(mid) > 0 {
@@ -829,4 +779,39 @@ func (d *oDiffer) reconstructString(idx int, rightString string, reqs []oRequest
 		req := &reqs[reqIdx]
 		req.update(patch, size, d.left.Entries[req.primaryIdx].Reference.Key)
 	}
+}
+
+type oracleHashIndex struct {
+	Data    map[mendoza.Hash][]int
+	XorData map[mendoza.Hash][]int
+}
+
+func newOracleHashIndex(hashList *mendoza.HashList) *oracleHashIndex {
+	hashIndex := &oracleHashIndex{
+		Data:    map[mendoza.Hash][]int{},
+		XorData: map[mendoza.Hash][]int{},
+	}
+
+	for idx, entry := range hashList.Entries {
+		hashIndex.Data[entry.Hash] = append(hashIndex.Data[entry.Hash], idx)
+
+		if !entry.XorHash.IsNull() {
+			for it := hashList.Iter(idx); !it.IsDone(); it.Next() {
+				childEntry := it.GetEntry()
+
+				xorHash := entry.XorHash
+				xorHash.Xor(childEntry.Hash)
+
+				current := hashIndex.XorData[xorHash]
+				if len(current) > 0 && current[len(current)-1] == idx {
+					// Already present.
+					continue
+				}
+
+				hashIndex.XorData[xorHash] = append(current, idx)
+			}
+		}
+	}
+
+	return hashIndex
 }

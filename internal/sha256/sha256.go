@@ -199,6 +199,20 @@ func (d *Digest) Write(p []byte) (nn int, err error) {
 	return
 }
 
+// WriteString is like Write, but avoids the allocation of converting s to a []byte.
+func (d *Digest) WriteString(s string) {
+	d.len += uint64(len(s))
+	for len(s) > 0 {
+		n := copy(d.x[d.nx:], s)
+		d.nx += n
+		s = s[n:]
+		if d.nx == chunk {
+			block(d, d.x[:])
+			d.nx = 0
+		}
+	}
+}
+
 func (d *Digest) Sum(in []byte) []byte {
 	// Make a copy of d so that caller can keep writing and summing.
 	d0 := *d
