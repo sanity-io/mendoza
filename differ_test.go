@@ -216,6 +216,102 @@ func TestConvertFunc(t *testing.T) {
 	}
 }
 
+func TestDifferZeroValue(t *testing.T) {
+	var d Differ
+	requireSameOutput(t, "initial forward", d.WriteTo, Patch{})
+	requireSameOutput(t, "initial reverse", d.WriteReverseTo, Patch{})
+	left, right := heavyPair(10)
+	checkPair(t, &d, left, right)
+}
+
+func TestDifferPatchesSurviveReuse(t *testing.T) {
+	left, right := heavyPair(10)
+	d := NewDiffer()
+	single, err := d.CreatePatch(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward, reverse, err := d.CreateDoublePatch(left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Overwrite the tape, grow it, and finally clear the current results.
+	if err := d.DiffDouble("before", "after"); err != nil {
+		t.Fatal(err)
+	}
+	largeLeft, largeRight := heavyPair(100)
+	if err := d.DiffDouble(largeLeft, largeRight); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Diff(nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	wantForward, wantReverse, err := oracleCreateDoublePatch(&DefaultOptions, left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireSamePatch(t, "single after reuse", single, wantForward, left, right)
+	requireSamePatch(t, "forward after reuse", forward, wantForward, left, right)
+	requireSamePatch(t, "reverse after reuse", reverse, wantReverse, right, left)
+	if got := ApplyPatch(left, forward); !reflect.DeepEqual(got, right) {
+		t.Fatal("forward patch changed after reuse")
+	}
+	if got := ApplyPatch(right, reverse); !reflect.DeepEqual(got, left) {
+		t.Fatal("reverse patch changed after reuse")
+	}
+}
+
+func TestDifferDiscardsPreviousResults(t *testing.T) {
+	left, right := heavyPair(10)
+	invalid := map[string]interface{}{"a": struct{}{}}
+	for _, test := range []struct {
+		name        string
+		left, right interface{}
+		double      bool
+		wantError   bool
+	}{
+		{"forward only", left, right, false, false},
+		{"equal forward", left, left, false, false},
+		{"equal double", left, left, true, false},
+		{"nil forward", nil, nil, false, false},
+		{"nil double", nil, nil, true, false},
+		{"error forward", invalid, right, false, true},
+		{"error double", left, invalid, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			d := NewDiffer()
+			if err := d.DiffDouble(left, right); err != nil {
+				t.Fatal(err)
+			}
+			diff := d.Diff
+			if test.double {
+				diff = d.DiffDouble
+			}
+			if err := diff(test.left, test.right); (err != nil) != test.wantError {
+				t.Fatalf("diff error = %v, want error = %t", err, test.wantError)
+			}
+			var forward, reverse Patch
+			if !test.wantError {
+				var err error
+				if test.double {
+					forward, reverse, err = oracleCreateDoublePatch(&DefaultOptions, test.left, test.right)
+				} else {
+					forward, err = oracleCreatePatch(&DefaultOptions, test.left, test.right)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i := 0; i < 2; i++ {
+				requireSameOutput(t, "forward", d.WriteTo, sortDeletes(forward))
+				requireSameOutput(t, "reverse", d.WriteReverseTo, sortDeletes(reverse))
+			}
+		})
+	}
+}
+
 func TestDifferErrors(t *testing.T) {
 	d := NewDiffer()
 	valid := map[string]interface{}{"a": "b"}
@@ -268,17 +364,30 @@ func (w *failingWriter) WriteValue(v interface{}) error { return w.write() }
 func TestWriteToReturnsWriterErrors(t *testing.T) {
 	left, right := heavyPair(100)
 	d := NewDiffer()
-	if err := d.Diff(left, right); err != nil {
+	forward, reverse, err := d.CreateDoublePatch(left, right)
+	if err != nil {
 		t.Fatal(err)
 	}
-	var all recordWriter
-	if err := d.WriteTo(&all); err != nil {
-		t.Fatal(err)
-	}
-	// Fail at every possible point.
-	for n := 0; n < len(all.out); n++ {
-		if err := d.WriteTo(&failingWriter{n: n}); err != errWriteFailed {
-			t.Fatalf("failing after %d writes: got error %v, want %v", n, err, errWriteFailed)
-		}
+	for _, test := range []struct {
+		name  string
+		write func(Writer) error
+		want  Patch
+	}{
+		{"forward", d.WriteTo, forward},
+		{"reverse", d.WriteReverseTo, reverse},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var all recordWriter
+			if err := test.write(&all); err != nil {
+				t.Fatal(err)
+			}
+			// Fail at every possible point, then retry on a fresh writer.
+			for n := 0; n < len(all.out); n++ {
+				if err := test.write(&failingWriter{n: n}); err != errWriteFailed {
+					t.Fatalf("failing after %d writes: got error %v, want %v", n, err, errWriteFailed)
+				}
+				requireSameOutput(t, "retry", test.write, test.want)
+			}
+		})
 	}
 }
