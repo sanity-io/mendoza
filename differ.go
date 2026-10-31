@@ -223,10 +223,6 @@ func (d *differ) reset() {
 	for i := range d.tape {
 		d.tape[i] = opRec{}
 	}
-	reqs := d.reqs[:cap(d.reqs)]
-	for i := range reqs {
-		reqs[i] = request{}
-	}
 
 	d.tape = d.tape[:0]
 	d.reqs = d.reqs[:0]
@@ -276,21 +272,22 @@ func (d *differ) build(left, right *mendoza.HashList, hashIndex *mendoza.HashInd
 	return req.patch
 }
 
+// Requests contain only indices, not document references, so their arena can be reused without clearing it.
 type request struct {
 	contextIdx int
 	primaryIdx int
 	size       int
 	patch      span
 	hasPatch   bool
-	outputKey  string
+	outputIdx  int
 }
 
-func (req *request) update(patch span, size int, outputKey string) {
+func (req *request) update(patch span, size int, outputIdx int) {
 	if size < req.size {
 		req.patch = patch
 		req.hasPatch = true
 		req.size = size
-		req.outputKey = outputKey
+		req.outputIdx = outputIdx
 	}
 }
 
@@ -647,7 +644,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 							d.emit(opRec{code: codeInclude, a: fieldReq.patch.start, b: fieldReq.patch.end})
 							size += fieldReq.size
 
-							if fieldReq.outputKey == fieldKey {
+							if d.left.Entries[fieldReq.outputIdx].Reference.Key == fieldKey {
 								d.emit(opRec{code: codeReturnIntoObjectSameKeyPop})
 								size += 1
 							} else {
@@ -669,7 +666,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		}
 
 		patch := span{patchStart, len(d.tape)}
-		d.reqs[cand.requestIdx].update(patch, size, d.left.Entries[primaryIdx].Reference.Key)
+		d.reqs[cand.requestIdx].update(patch, size, primaryIdx)
 	}
 
 	d.reqs = d.reqs[:reqsMark]
@@ -871,7 +868,7 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 		}
 
 		patch := span{patchStart, len(d.tape)}
-		d.reqs[cand.requestIdx].update(patch, size, d.left.Entries[contextIdx].Reference.Key)
+		d.reqs[cand.requestIdx].update(patch, size, contextIdx)
 	}
 
 	d.reqs = d.reqs[:reqsMark]
@@ -951,7 +948,7 @@ func (d *differ) reconstructString(idx int, rightString string, reqs span) {
 		}
 
 		patch := span{patchStart, len(d.tape)}
-		d.reqs[reqIdx].update(patch, size, leftEntry.Reference.Key)
+		d.reqs[reqIdx].update(patch, size, primaryIdx)
 	}
 }
 

@@ -144,6 +144,36 @@ func BenchmarkDifferWriteTo(b *testing.B) {
 	})
 }
 
+// BenchmarkDifferSmallAfterLarge measures steady-state small diffs after a large diff has grown the arenas.
+// Exclude the first small diff: releasing references to the large documents once is expected, but subsequent
+// small diffs should not keep clearing the unused capacity of those arenas.
+func BenchmarkDifferSmallAfterLarge(b *testing.B) {
+	for _, n := range []int{0, 1000, 10000, 100000} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			d := NewDiffer()
+			if n > 0 {
+				left, right := make([]interface{}, n), make([]interface{}, n)
+				for i := range left {
+					left[i], right[i] = float64(i), float64(i+n)
+				}
+				if err := d.Diff(left, right); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if err := d.Diff("a", "b"); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := d.Diff("a", "b"); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkApplyPatch(b *testing.B) {
 	benchPairs(b, func(b *testing.B, left, right interface{}) {
 		patch, err := CreatePatch(left, right)
