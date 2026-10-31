@@ -50,6 +50,13 @@ func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 //
 // Use a Differ instead to reuse memory between calls.
 func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
+	// No working memory is needed when there is no source document.
+	if left == nil {
+		if right == nil {
+			return Patch{}, nil
+		}
+		return Patch{&OpValue{Value: right}}, nil
+	}
 	return options.NewDiffer().CreatePatch(left, right)
 }
 
@@ -58,6 +65,13 @@ func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
 //
 // Use a Differ instead to reuse memory between calls.
 func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
+	// Preserve the literal-only fast paths without allocating a Differ or tape.
+	if left == nil && right == nil {
+		return Patch{}, Patch{}, nil
+	}
+	if left == nil || right == nil {
+		return Patch{&OpValue{Value: right}}, Patch{&OpValue{Value: left}}, nil
+	}
 	return options.NewDiffer().CreateDoublePatch(left, right)
 }
 
@@ -192,9 +206,9 @@ The slices grow as needed, and each reconstruction call truncates its scratch da
 Use indices across recursive calls: appends can reallocate the arenas, leaving pointers into old backing
 arrays stale. Left/right HashList entries are stable during reconstruction.
 
-Patches are recorded as ops on a tape. Unlike scratch data, tape records survive recursive calls so a parent
-can include a child's patch by span (codeInclude) instead of copying it. Patch sizes are heuristic costs,
-not operation counts or exact serialized byte lengths.
+Patches are recorded as ops on a tape. Rejected candidates' newly emitted records are discarded, while selected
+patches survive recursive calls so a parent can include a child's patch by span (codeInclude) instead of copying
+it. Patch sizes are heuristic costs, not operation counts or exact serialized byte lengths.
 
 */
 
@@ -220,12 +234,7 @@ type differ struct {
 }
 
 func (d *differ) reset() {
-	// Drop references to the previous documents.
-	for i := range d.tape {
-		d.tape[i] = opRec{}
-	}
-
-	d.tape = d.tape[:0]
+	d.truncateTape(0)
 	d.reqs = d.reqs[:0]
 	d.requestOffsets = d.requestOffsets[:0]
 	d.candidates = d.candidates[:0]
@@ -246,12 +255,16 @@ func (d *differ) build(left, right *mendoza.HashList, hashIndex *mendoza.HashInd
 		size:       root.Size + 1,
 	})
 
+	tapeStart := len(d.tape)
 	d.reconstruct(0, span{0, 1})
 
 	req := d.reqs[0]
 	d.reqs = d.reqs[:0]
 
 	if !req.hasPatch {
+		// No reconstructed child is reachable when the whole document is replaced.
+		// Keep any earlier build's tape (the forward patch in DiffDouble).
+		d.truncateTape(tapeStart)
 		return d.valueSpan(root.Value)
 	}
 
@@ -270,13 +283,19 @@ type request struct {
 	patchSourceIdx int
 }
 
-func (req *request) update(patch span, size int, patchSourceIdx int) {
-	if size < req.size {
-		req.patch = patch
-		req.hasPatch = true
-		req.size = size
-		req.patchSourceIdx = patchSourceIdx
+// updateRequest keeps the newly recorded patch only if it improves the request's cost.
+// The patch must be at the end of the tape: rejected records have no users and can be discarded,
+// while earlier child spans and previously selected patches must remain valid.
+func (d *differ) updateRequest(reqIdx int, patch span, size int, patchSourceIdx int) {
+	req := &d.reqs[reqIdx]
+	if size >= req.size {
+		d.truncateTape(patch.start)
+		return
 	}
+	req.patch = patch
+	req.hasPatch = true
+	req.size = size
+	req.patchSourceIdx = patchSourceIdx
 }
 
 // requestsForField returns the request range for a field or element. offset is the start of this container's
@@ -648,7 +667,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		}
 
 		patch := span{patchStart, len(d.tape)}
-		d.reqs[cand.requestIdx].update(patch, size, primaryIdx)
+		d.updateRequest(cand.requestIdx, patch, size, primaryIdx)
 	}
 
 	// Restore scratch slices; the parent still needs the patches on the tape.
@@ -843,7 +862,7 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 		}
 
 		patch := span{patchStart, len(d.tape)}
-		d.reqs[cand.requestIdx].update(patch, size, contextIdx)
+		d.updateRequest(cand.requestIdx, patch, size, contextIdx)
 	}
 
 	// Restore scratch slices; the parent still needs the patches on the tape.
@@ -897,33 +916,39 @@ func (d *differ) reconstructString(rightString string, reqs span) {
 			panic("unnecessary reconstruction of string")
 		}
 
-		size := 0
-		patchStart := len(d.tape)
-
-		d.enterBlank(primaryIdx)
-		size += 2
-
 		prefix := commonPrefix(leftString, rightString)
+		suffix := commonSuffix(leftString, rightString, prefix)
+		mid := rightString[prefix : len(rightString)-suffix]
 
+		// String costs are known up front. Avoid growing the tape for a patch that
+		// cannot beat the current choice (including an equal-cost literal).
+		size := 2 // enterBlank
 		if prefix > 0 {
-			d.emit(opRec{code: codeStringAppendSlice, a: 0, b: prefix})
 			size += 3
 		}
-
-		suffix := commonSuffix(leftString, rightString, prefix)
-
-		mid := rightString[prefix : len(rightString)-suffix]
 		if len(mid) > 0 {
-			d.emit(opRec{code: codeStringAppendString, key: mid})
 			size += 1 + len(mid)
 		}
+		if suffix > 0 {
+			size += 3
+		}
+		if size >= d.reqs[reqIdx].size {
+			continue
+		}
 
+		patchStart := len(d.tape)
+		d.enterBlank(primaryIdx)
+		if prefix > 0 {
+			d.emit(opRec{code: codeStringAppendSlice, a: 0, b: prefix})
+		}
+		if len(mid) > 0 {
+			d.emit(opRec{code: codeStringAppendString, key: mid})
+		}
 		if suffix > 0 {
 			d.emit(opRec{code: codeStringAppendSlice, a: len(leftString) - suffix, b: len(leftString)})
-			size += 3
 		}
 
 		patch := span{patchStart, len(d.tape)}
-		d.reqs[reqIdx].update(patch, size, primaryIdx)
+		d.updateRequest(reqIdx, patch, size, primaryIdx)
 	}
 }

@@ -42,6 +42,27 @@ func TestDiffDoesNotAllocate(t *testing.T) {
 	}
 }
 
+func TestNilPatchAllocations(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		run       func()
+		maxAllocs float64
+	}{
+		{"empty", func() { CreatePatch(nil, nil) }, 0},
+		{"insert", func() { CreatePatch(nil, "insert") }, 2},
+		{"double empty", func() { CreateDoublePatch(nil, nil) }, 0},
+		{"double insert", func() { CreateDoublePatch(nil, "insert") }, 4},
+		{"double delete", func() { CreateDoublePatch("delete", nil) }, 4},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Only the returned slices and OpValues may allocate; no Differ or tape.
+			if allocs := testing.AllocsPerRun(100, test.run); allocs > test.maxAllocs {
+				t.Errorf("%v allocations, want at most %v", allocs, test.maxAllocs)
+			}
+		})
+	}
+}
+
 // TestCreatePatchAllocations checks that a reused Differ only allocates the returned Patch: the slice and (at most)
 // one allocation per op.
 func TestCreatePatchAllocations(t *testing.T) {

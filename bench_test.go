@@ -3,6 +3,7 @@ package mendoza
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +55,17 @@ func heavyPair(n int) (map[string]interface{}, map[string]interface{}) {
 		r["body"] = body
 	}
 	return l, r
+}
+
+// replacementPair has no reusable string prefixes or suffixes. Reconstruction loses to
+// literal replacement, exercising the cost and memory usage of rejected patches.
+func replacementPair(n int) (interface{}, interface{}) {
+	left, right := make([]interface{}, n), make([]interface{}, n)
+	for i := range left {
+		left[i] = strings.Repeat("a", 80) + fmt.Sprint(i) + "x"
+		right[i] = strings.Repeat("b", 80) + fmt.Sprint(i) + "y"
+	}
+	return left, right
 }
 
 // norm round-trips v through JSON so that it looks like a decoded document.
@@ -195,6 +207,67 @@ func BenchmarkDifferSmallAfterLarge(b *testing.B) {
 					b.Fatal(err)
 				}
 			}
+		})
+	}
+}
+
+// BenchmarkReplacement reports bytes as well as allocation counts: rejected candidates
+// should not accumulate on the tape even though the resulting patch is just one literal.
+func BenchmarkReplacement(b *testing.B) {
+	for _, n := range []int{100, 10000} {
+		left, right := replacementPair(n)
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.Run("CreatePatch", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					if _, err := CreatePatch(left, right); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+			b.Run("Differ", func(b *testing.B) {
+				d := NewDiffer()
+				if err := d.Diff(left, right); err != nil {
+					b.Fatal(err)
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if err := d.Diff(left, right); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		})
+	}
+}
+
+func BenchmarkNilPatch(b *testing.B) {
+	for _, test := range []struct {
+		name        string
+		left, right interface{}
+	}{
+		{"empty", nil, nil},
+		{"insert", nil, "insert"},
+		{"delete", "delete", nil},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			b.Run("CreatePatch", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					if _, err := CreatePatch(test.left, test.right); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+			b.Run("CreateDoublePatch", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					if _, _, err := CreateDoublePatch(test.left, test.right); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
 		})
 	}
 }

@@ -17,6 +17,15 @@ func (d *differ) emit(op opRec) {
 	d.tape = append(d.tape, op)
 }
 
+// truncateTape discards a suffix, clearing document references before reusing its capacity.
+func (d *differ) truncateTape(start int) {
+	discarded := d.tape[start:]
+	for i := range discarded {
+		discarded[i] = opRec{}
+	}
+	d.tape = d.tape[:start]
+}
+
 func (d *differ) valueSpan(value interface{}) span {
 	start := len(d.tape)
 	d.emit(opRec{code: codeValue, val: value})
@@ -41,6 +50,8 @@ func (d *differ) writeSpan(w Writer, sp span) error {
 
 		var err error
 		switch op.code {
+		case codeBlank, codeReturnIntoObjectSameKeyPop, codeReturnIntoArrayPop:
+			// These operations have no operands.
 		case codeValue, codeArrayAppendValue:
 			err = w.WriteValue(op.val)
 		case codePushFieldBlank, codePushFieldCopy, codePushElementBlank, codePushElementCopy,
@@ -56,6 +67,8 @@ func (d *differ) writeSpan(w Writer, sp span) error {
 			if err = w.WriteUint(op.a); err == nil {
 				err = w.WriteUint(op.b)
 			}
+		default:
+			panic("mendoza: unexpected op on tape")
 		}
 		if err != nil {
 			return err
