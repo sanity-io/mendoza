@@ -6,11 +6,13 @@ import (
 	"github.com/sanity-io/mendoza/internal/mendoza"
 )
 
-// Differ creates patches. It owns all of the memory needed for diffing, so once its buffers have grown to fit
-// the documents, diffing and writing the result doesn't allocate.
+// Differ creates patches while reusing its working memory. On Go 1.24+ with the default runtime, warmed-up
+// diffs can run without allocating. Older Go map implementations may still allocate when rebuilding the index.
+// Writers and conversion functions may allocate independently.
 //
-// A Differ is not safe for concurrent use. It keeps references to the last documents it was given until the next
-// call.
+// The zero value is ready to use. A Differ must not be copied after first use and is not safe for concurrent use.
+// It keeps references to its last documents until the next diff, and retains buffer capacity for reuse.
+// Inputs must not be mutated between diffing and writing the result.
 type Differ struct {
 	options             Options
 	left, right         mendoza.HashList
@@ -59,7 +61,8 @@ func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch
 	return options.NewDiffer().CreateDoublePatch(left, right)
 }
 
-// CreatePatch is like Options.CreatePatch, but reuses the Differ's memory. Only the returned Patch is allocated.
+// CreatePatch is like Options.CreatePatch, but reuses the Differ's working memory. The returned Patch and its
+// operations are allocated separately and remain valid across calls. Values in the patch are not deep-copied.
 func (d *Differ) CreatePatch(left, right interface{}) (Patch, error) {
 	if err := d.Diff(left, right); err != nil {
 		return nil, err
@@ -67,8 +70,8 @@ func (d *Differ) CreatePatch(left, right interface{}) (Patch, error) {
 	return d.differ.patchFor(d.patch), nil
 }
 
-// CreateDoublePatch is like Options.CreateDoublePatch, but reuses the Differ's memory. Only the returned Patches
-// are allocated.
+// CreateDoublePatch is like Options.CreateDoublePatch, but reuses the Differ's working memory. The returned
+// Patches and their operations are allocated separately and remain valid across calls. Values are not deep-copied.
 func (d *Differ) CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 	if err := d.DiffDouble(left, right); err != nil {
 		return nil, nil, err
@@ -77,7 +80,8 @@ func (d *Differ) CreateDoublePatch(left, right interface{}) (Patch, Patch, error
 }
 
 // Diff computes a patch which can be applied to the left document to produce the right document. Use WriteTo to
-// write it out. It is only valid until the next call on the Differ.
+// write it out without allocating a Patch. The result is valid until the next diff (including CreatePatch or
+// CreateDoublePatch). Each diff discards both previous results, even if it returns an error.
 func (d *Differ) Diff(left, right interface{}) error {
 	d.reset()
 
@@ -102,7 +106,7 @@ func (d *Differ) Diff(left, right interface{}) error {
 
 // DiffDouble computes two patches: The first can be applied to the left document to produce the right document,
 // the second can be applied to the right document to produce the left document. Use WriteTo and WriteReverseTo to
-// write them out. They are only valid until the next call on the Differ.
+// write them out without allocating Patches. The results have the same lifetime as the result of Diff.
 func (d *Differ) DiffDouble(left, right interface{}) error {
 	d.reset()
 
@@ -131,12 +135,14 @@ func (d *Differ) DiffDouble(left, right interface{}) error {
 	return nil
 }
 
-// WriteTo writes the patch computed by the last call to Diff or DiffDouble.
+// WriteTo writes the last forward patch. It can be called repeatedly, including after a writer error.
+// Before a diff or after a failed diff, it writes nothing.
 func (d *Differ) WriteTo(w Writer) error {
 	return d.differ.writeSpan(w, d.patch)
 }
 
-// WriteReverseTo writes the reverse patch computed by the last call to DiffDouble.
+// WriteReverseTo writes the last reverse patch. It can be called repeatedly, including after a writer error.
+// Before DiffDouble, after a forward-only diff, or after a failed diff, it writes nothing.
 func (d *Differ) WriteReverseTo(w Writer) error {
 	return d.differ.writeSpan(w, d.reversePatch)
 }
