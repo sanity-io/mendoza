@@ -216,6 +216,38 @@ func TestConvertFunc(t *testing.T) {
 	}
 }
 
+func TestRequestForContext(t *testing.T) {
+	d := differ{reqs: []request{
+		{contextIdx: 0, hasPatch: true},
+		{contextIdx: 1},
+		{contextIdx: 1, hasPatch: true},
+		{contextIdx: 2, hasPatch: true},
+	}}
+	for _, test := range []struct {
+		name       string
+		reqs       span
+		contextIdx int
+		wantIdx    int
+	}{
+		{"first match without patch", span{1, 4}, 1, 1},
+		{"first match with patch", span{2, 4}, 1, 2},
+		{"missing", span{0, 4}, 3, -1},
+		{"before range", span{1, 4}, 0, -1},
+		{"after range", span{0, 3}, 2, -1},
+		{"empty range", span{1, 1}, 1, -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var want *request
+			if test.wantIdx >= 0 {
+				want = &d.reqs[test.wantIdx]
+			}
+			if got := d.requestForContext(test.reqs, test.contextIdx); got != want {
+				t.Fatalf("request = %v, want first match at index %d", got, test.wantIdx)
+			}
+		})
+	}
+}
+
 func TestDifferZeroValue(t *testing.T) {
 	var d Differ
 	requireSameOutput(t, "initial forward", d.WriteTo, Patch{})

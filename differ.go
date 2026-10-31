@@ -307,6 +307,17 @@ func (d *differ) requestsForField(offset int, field int) span {
 	return span{d.requestOffsets[offset+field], d.requestOffsets[offset+field+1]}
 }
 
+// requestForContext returns the first matching request, even if it has no patch. Later requests with the same
+// context must not override that choice. The returned pointer is only valid until the next append to d.reqs.
+func (d *differ) requestForContext(reqs span, contextIdx int) *request {
+	for i := reqs.start; i < reqs.end; i++ {
+		if d.reqs[i].contextIdx == contextIdx {
+			return &d.reqs[i]
+		}
+	}
+	return nil
+}
+
 func (d *differ) reconstruct(idx int, reqs span) {
 	if reqs.start == reqs.end {
 		return
@@ -325,7 +336,7 @@ func (d *differ) reconstruct(idx int, reqs span) {
 	}
 
 	if rightString, ok := entry.Value.(string); ok {
-		d.reconstructString(idx, rightString, reqs)
+		d.reconstructString(rightString, reqs)
 		return
 	}
 }
@@ -637,33 +648,21 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 					size += 2 + 1 + len(fieldKey)
 				}
 			} else {
-				didPatch := false
-
-				// Not an alias. Look up the real diff.
+				// Not an alias: use a reconstructed child patch, or insert the value directly.
 				fieldReqs := d.requestsForField(fieldRequestsOffset, fieldEntry.Reference.Index)
-				for i := fieldReqs.start; i < fieldReqs.end; i++ {
-					fieldReq := &d.reqs[i]
-					if fieldReq.contextIdx == cand.contextIdx {
-						// Match it up with the correct context
-						if fieldReq.hasPatch {
-							d.emit(opRec{code: codeInclude, a: fieldReq.patch.start, b: fieldReq.patch.end})
-							size += fieldReq.size
+				fieldReq := d.requestForContext(fieldReqs, cand.contextIdx)
+				if fieldReq != nil && fieldReq.hasPatch {
+					d.emit(opRec{code: codeInclude, a: fieldReq.patch.start, b: fieldReq.patch.end})
+					size += fieldReq.size
 
-							if d.left.Entries[fieldReq.patchSourceIdx].Reference.Key == fieldKey {
-								d.emit(opRec{code: codeReturnIntoObjectSameKeyPop})
-								size += 1
-							} else {
-								d.emit(opRec{code: codeReturnIntoObjectPop, key: fieldKey})
-								size += 1 + len(fieldKey)
-							}
-							didPatch = true
-						}
-
-						break
+					if d.left.Entries[fieldReq.patchSourceIdx].Reference.Key == fieldKey {
+						d.emit(opRec{code: codeReturnIntoObjectSameKeyPop})
+						size += 1
+					} else {
+						d.emit(opRec{code: codeReturnIntoObjectPop, key: fieldKey})
+						size += 1 + len(fieldKey)
 					}
-				}
-
-				if !didPatch {
+				} else {
 					d.emit(opRec{code: codeObjectSetFieldValue, val: fieldEntry.Value, key: fieldKey})
 					size += 1 + len(fieldKey) + fieldEntry.Size
 				}
@@ -850,26 +849,15 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 					startSlice = -1
 				}
 			} else {
-				didPatch := false
-
+				// Not an alias: use a reconstructed child patch, or insert the value directly.
 				elementReqs := d.requestsForField(elementRequestsOffset, pos)
-				for i := elementReqs.start; i < elementReqs.end; i++ {
-					elementReq := &d.reqs[i]
-					if elementReq.contextIdx == contextIdx {
-						if elementReq.hasPatch {
-							d.emit(opRec{code: codeInclude, a: elementReq.patch.start, b: elementReq.patch.end})
-							size += elementReq.size
-							d.emit(opRec{code: codeReturnIntoArrayPop})
-							size += 1
-
-							didPatch = true
-						}
-
-						break
-					}
-				}
-
-				if !didPatch {
+				elementReq := d.requestForContext(elementReqs, contextIdx)
+				if elementReq != nil && elementReq.hasPatch {
+					d.emit(opRec{code: codeInclude, a: elementReq.patch.start, b: elementReq.patch.end})
+					size += elementReq.size
+					d.emit(opRec{code: codeReturnIntoArrayPop})
+					size += 1
+				} else {
 					d.emit(opRec{code: codeArrayAppendValue, val: elementEntry.Value})
 					size += 1 + elementEntry.Size
 				}
@@ -917,7 +905,7 @@ func commonSuffix(a, b string, prefix int) int {
 	return i
 }
 
-func (d *differ) reconstructString(idx int, rightString string, reqs span) {
+func (d *differ) reconstructString(rightString string, reqs span) {
 	for reqIdx := reqs.start; reqIdx < reqs.end; reqIdx++ {
 		primaryIdx := d.reqs[reqIdx].primaryIdx
 		leftEntry := &d.left.Entries[primaryIdx]
