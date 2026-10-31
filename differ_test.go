@@ -159,6 +159,30 @@ func TestMatchesOriginalNil(t *testing.T) {
 	checkPair(t, d, nil, "a")
 }
 
+func TestDifferUnchangedSkipsIndex(t *testing.T) {
+	for _, double := range []bool{false, true} {
+		t.Run(fmt.Sprintf("double=%t", double), func(t *testing.T) {
+			d := NewDiffer()
+			left, right := makeDoc(10, false), makeDoc(10, false)
+			if double {
+				if err := d.DiffDouble(left, right); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := d.Diff(left, right); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(d.hashIndex, NewDiffer().hashIndex) {
+				t.Fatal("unchanged documents should not build a hash index")
+			}
+			requireSameOutput(t, "unchanged forward", d.WriteTo, Patch{})
+			requireSameOutput(t, "unchanged reverse", d.WriteReverseTo, Patch{})
+
+			// A subsequent changed document must still build its index and produce the right patch.
+			checkPair(t, d, left, makeDoc(10, true))
+		})
+	}
+}
+
 type wrapped struct{ value interface{} }
 
 func TestConvertFunc(t *testing.T) {

@@ -91,6 +91,9 @@ func (d *Differ) Diff(left, right interface{}) error {
 	if err := d.fill(left, right); err != nil {
 		return err
 	}
+	if d.left.Entries[0].Hash == d.right.Entries[0].Hash {
+		return nil
+	}
 
 	d.hashIndex.Build(&d.left)
 	d.patch = d.differ.build(&d.left, &d.right, &d.hashIndex)
@@ -115,6 +118,9 @@ func (d *Differ) DiffDouble(left, right interface{}) error {
 
 	if err := d.fill(left, right); err != nil {
 		return err
+	}
+	if d.left.Entries[0].Hash == d.right.Entries[0].Hash {
+		return nil
 	}
 
 	d.hashIndex.Build(&d.left)
@@ -248,11 +254,6 @@ func (d *differ) build(left, right *mendoza.HashList, hashIndex *mendoza.HashInd
 	d.hashIndex = hashIndex
 
 	root := &d.right.Entries[0]
-
-	if d.left.Entries[0].Hash == root.Hash {
-		// Exact same value
-		return span{}
-	}
 
 	d.reqs = append(d.reqs[:0], request{
 		contextIdx: -1,

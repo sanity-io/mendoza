@@ -144,6 +144,31 @@ func BenchmarkDifferWriteTo(b *testing.B) {
 	})
 }
 
+func BenchmarkDifferUnchanged(b *testing.B) {
+	for _, n := range []int{10, 100, 1000} {
+		left, right := makeDoc(n, false), makeDoc(n, false)
+		for _, double := range []bool{false, true} {
+			b.Run(fmt.Sprintf("double=%t/%d", double, n), func(b *testing.B) {
+				d := NewDiffer()
+				diff := d.Diff
+				if double {
+					diff = d.DiffDouble
+				}
+				if err := diff(left, right); err != nil {
+					b.Fatal(err)
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if err := diff(left, right); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
 // BenchmarkDifferSmallAfterLarge measures steady-state small diffs after a large diff has grown the arenas.
 // Exclude the first small diff: releasing references to the large documents once is expected, but subsequent
 // small diffs should not keep clearing the unused capacity of those arenas.
