@@ -3,8 +3,8 @@ package mendoza
 // HashIndex maps a hash to the entries with that hash, in ascending order.
 //
 // Each list is stored as a linked chain in a shared node slice instead of as a
-// []int per hash. This lets Build reuse all of its memory when the index is
-// rebuilt for another document.
+// []int per hash. Build reuses the nodes and map storage when the index is
+// rebuilt for another document, though older Go map implementations may still allocate.
 type HashIndex struct {
 	data    map[Hash]chain
 	xorData map[Hash]chain

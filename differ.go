@@ -166,7 +166,7 @@ func (d *Differ) reset() {
 
 The main function in the differ is `reconstruct` which takes two parameters.
 The first is the target value: a reference to a value in the right-hand side.
-The second parameter is a slice of _requests_. A request has an _initial
+The second parameter identifies a range of _requests_ in d.reqs. A request has an _initial
 context_ which is a reference to a value in the left-hand side. The goal of
 `reconstruct` is then, for each request, build a patch which converts the
 _initial context_ into the target value.  Every request also keeps track of the
@@ -174,27 +174,27 @@ _best size_.
 
 For arrays/objects this is done in a few steps:
 
-1. First we look at the target (ignoring any context) and find other values that are good candidates.
-   This is a cheap check which uses the global hash index and only looks for objects/arrays that
-   shares some fields/elements with the target. This can only check for exact equality.
+1. Collect candidates for each request. We try its primary value and, for objects, other direct children
+   of its context found through the xor index. Candidate discovery is a heuristic; patch costs are not
+   known until reconstruction finishes.
 
-2. Then we do filtering of candidates based on the requests' context:
-   - Currently we only care about candidates that are direct children of the context.
-   - Per request we pick the N best candidates to explore. This is just an heuristic because we only know
-     "how many fields/elements they have in common" and nothing about the size of representing the patch of
-     the differences.
+2. Find exact aliases: fields/elements in each candidate whose value hashes match those in the target.
 
 3. For each field/element in the target we can then build a list of requests (based on the candidates)
    and recurse into `reconstruct`. The more candidates we have in the previous step, the more requests
    we'll have in this step, and the time complexity will be higher.
 
-4. At this point we know have full information about each candidate: All patches are calculated.
+4. At this point we have full information about each candidate: All patches are calculated.
    We then just need to connect each candidate with a request and we're done!
 
-Memory: To avoid allocating, the differ never creates maps or slices while diffing. Requests, candidates
-and aliases are appended to slices owned by the differ (arenas), referred to by index, and each call removes
-what it appended before returning. Patches are recorded as ops on a tape; a parent includes a child's patch
-by referring to its span on the tape (codeInclude) instead of copying it.
+Memory: Requests, candidates and aliases are appended to reusable slices owned by the differ (arenas).
+The slices grow as needed, and each reconstruction call truncates its scratch data before returning.
+Use indices across recursive calls: appends can reallocate the arenas, leaving pointers into old backing
+arrays stale. Left/right HashList entries are stable during reconstruction.
+
+Patches are recorded as ops on a tape. Unlike scratch data, tape records survive recursive calls so a parent
+can include a child's patch by span (codeInclude) instead of copying it. Patch sizes are heuristic costs,
+not operation counts or exact serialized byte lengths.
 
 */
 
@@ -211,7 +211,8 @@ type opRec struct {
 	val  interface{}
 }
 
-// codeInclude is only used on the tape: It stands for all the ops in tape[a:b].
+// codeInclude is only used on the tape: it stands for all the ops in tape[a:b].
+// Included spans are recorded before their parent patch, so these references cannot form cycles.
 const codeInclude uint8 = 255
 
 type differ struct {
@@ -222,8 +223,8 @@ type differ struct {
 	tape []opRec
 
 	reqs []request
-	// ranges records where each field's requests start in reqs; see fieldRequests.
-	ranges []int
+	// requestOffsets records where each field/element's requests start in reqs; see requestsForField.
+	requestOffsets []int
 
 	candidates   []candidate
 	mapAliases   []mapAlias
@@ -238,7 +239,7 @@ func (d *differ) reset() {
 
 	d.tape = d.tape[:0]
 	d.reqs = d.reqs[:0]
-	d.ranges = d.ranges[:0]
+	d.requestOffsets = d.requestOffsets[:0]
 	d.candidates = d.candidates[:0]
 	d.mapAliases = d.mapAliases[:0]
 	d.sliceAliases = d.sliceAliases[:0]
@@ -281,28 +282,29 @@ func (d *differ) build(left, right *mendoza.HashList, hashIndex *mendoza.HashInd
 
 // Requests contain only indices, not document references, so their arena can be reused without clearing it.
 type request struct {
+	// Both indices refer to the left document. contextIdx is -1 for the root request.
 	contextIdx int
 	primaryIdx int
 	size       int
 	patch      span
 	hasPatch   bool
-	outputIdx  int
+	// patchSourceIdx is the left-document entry used by the chosen patch, whose key is needed on return.
+	patchSourceIdx int
 }
 
-func (req *request) update(patch span, size int, outputIdx int) {
+func (req *request) update(patch span, size int, patchSourceIdx int) {
 	if size < req.size {
 		req.patch = patch
 		req.hasPatch = true
 		req.size = size
-		req.outputIdx = outputIdx
+		req.patchSourceIdx = patchSourceIdx
 	}
 }
 
-// fieldRequests returns the requests for a field. The requests are built one field at a time, and before each field
-// the start of its requests in d.reqs is appended to d.ranges (and after the last field, the end). offset is the
-// length of d.ranges before the first field.
-func (d *differ) fieldRequests(offset int, field int) span {
-	return span{d.ranges[offset+field], d.ranges[offset+field+1]}
+// requestsForField returns the request range for a field or element. offset is the start of this container's
+// entries in requestOffsets. Each container records one offset per field/element, plus a final end offset.
+func (d *differ) requestsForField(offset int, field int) span {
+	return span{d.requestOffsets[offset+field], d.requestOffsets[offset+field+1]}
 }
 
 func (d *differ) reconstruct(idx int, reqs span) {
@@ -366,7 +368,7 @@ Some notes about how we're building up calls from candidates:
 
 An object has multiple fields: {"a": "…", "b": …, "c": …}, and we find candidates of objects that are similar.
 
-Imagine that we found three candidates:
+Imagine that we found four candidates:
   - cand1 has {"a": "…", "b": …, "c": "different"}
   - cand2 has {"a": "…", "b": "different", "c": …}
   - cand3 has {"a": "…", "b": "different", "c": "different"}
@@ -384,11 +386,10 @@ In this case the 2 recursive calls are as follows:
 
 // This stores information about each candidate map/slice in the left-side document.
 type candidate struct {
-	contextIdx int
-	requestIdx int
-	// aliases is the offset in d.mapAliases or d.sliceAliases of this candidate's aliases: one per field/element in
-	// the target.
-	aliases int
+	contextIdx int // Candidate container in the left document.
+	requestIdx int // Request in d.reqs that this candidate is trying to satisfy.
+	// aliasOffset starts this candidate's range in mapAliases or sliceAliases, one slot per target field/element.
+	aliasOffset int
 	// contextIter walks the candidate's fields/elements while the requests are built.
 	contextIter mendoza.Iter
 }
@@ -403,7 +404,7 @@ func (d *differ) addMapCandidate(contextIdx int, requestIdx int, fieldCount int)
 	d.candidates = append(d.candidates, candidate{
 		contextIdx:  contextIdx,
 		requestIdx:  requestIdx,
-		aliases:     len(d.mapAliases),
+		aliasOffset: len(d.mapAliases),
 		contextIter: d.left.Iter(contextIdx),
 	})
 	for i := 0; i < fieldCount; i++ {
@@ -412,7 +413,7 @@ func (d *differ) addMapCandidate(contextIdx int, requestIdx int, fieldCount int)
 }
 
 func (d *differ) mapAlias(cand *candidate, target mendoza.Reference) *mapAlias {
-	return &d.mapAliases[cand.aliases+target.Index]
+	return &d.mapAliases[cand.aliasOffset+target.Index]
 }
 
 func (d *differ) insertMapAlias(cand *candidate, target mendoza.Reference, source mendoza.Reference) {
@@ -489,10 +490,9 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 	reqsMark := len(d.reqs)
 	candidatesMark := len(d.candidates)
 	aliasesMark := len(d.mapAliases)
-	rangesMark := len(d.ranges)
+	offsetsMark := len(d.requestOffsets)
 
-	// Currently we're only looking at primary.
-
+	// Find candidates: start with each request's primary value.
 	for i := reqs.start; i < reqs.end; i++ {
 		req := &d.reqs[i]
 		if !d.left.Entries[req.primaryIdx].IsNonEmptyMap() {
@@ -502,7 +502,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		d.addMapCandidate(req.primaryIdx, i, fieldCount)
 	}
 
-	// Use the xor-index to find fields that differ a bit
+	// Also try sibling objects that match after removing one field's value hash.
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		fieldEntry := it.GetEntry()
 
@@ -527,6 +527,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 
 	candidates := span{candidatesMark, len(d.candidates)}
 
+	// Find exact aliases within each candidate.
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		fieldEntry := it.GetEntry()
 
@@ -546,12 +547,12 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		}
 	}
 
-	// Now build the requests, one field at a time
-	fieldRequests := len(d.ranges)
+	// Build child requests, grouped by target field.
+	fieldRequestsOffset := len(d.requestOffsets)
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		fieldEntry := it.GetEntry()
 		fieldKey := fieldEntry.Reference.Key
-		d.ranges = append(d.ranges, len(d.reqs))
+		d.requestOffsets = append(d.requestOffsets, len(d.reqs))
 
 		for c := candidates.start; c < candidates.end; c++ {
 			cand := &d.candidates[c]
@@ -579,12 +580,14 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 			}
 		}
 	}
-	d.ranges = append(d.ranges, len(d.reqs))
+	d.requestOffsets = append(d.requestOffsets, len(d.reqs))
 
+	// Reconstruct each target field for its requested contexts.
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		d.reconstruct(it.GetIndex(), d.fieldRequests(fieldRequests, it.GetEntry().Reference.Index))
+		d.reconstruct(it.GetIndex(), d.requestsForField(fieldRequestsOffset, it.GetEntry().Reference.Index))
 	}
 
+	// Assemble each candidate's patch and keep the cheapest for its request.
 	for c := candidates.start; c < candidates.end; c++ {
 		cand := &d.candidates[c]
 		primaryIdx := cand.contextIdx
@@ -595,19 +598,14 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		removeCount := d.removedFields(primaryIdx, idx, false)
 		aliasCount := 0
 		for i := 0; i < fieldCount; i++ {
-			if d.mapAliases[cand.aliases+i].ok {
+			if d.mapAliases[cand.aliasOffset+i].ok {
 				aliasCount++
 			}
 		}
 
-		isCopy := false
-
-		if removeCount < aliasCount {
-			// Note: This doesn't currently take into account that we have two types of aliasing.
-			// It's shorter to alias a field with the same key (one single copy field).
-			// For now let's assume that the difference here is pretty small either way.
-			isCopy = true
-		}
+		// Start from a copy when fewer deletes than aliases are needed. This is only an estimate:
+		// same-key aliases are cheaper than renamed aliases, but both count equally here.
+		isCopy := removeCount < aliasCount
 
 		if isCopy {
 			d.enterCopy(primaryIdx)
@@ -642,7 +640,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 				didPatch := false
 
 				// Not an alias. Look up the real diff.
-				fieldReqs := d.fieldRequests(fieldRequests, fieldEntry.Reference.Index)
+				fieldReqs := d.requestsForField(fieldRequestsOffset, fieldEntry.Reference.Index)
 				for i := fieldReqs.start; i < fieldReqs.end; i++ {
 					fieldReq := &d.reqs[i]
 					if fieldReq.contextIdx == cand.contextIdx {
@@ -651,7 +649,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 							d.emit(opRec{code: codeInclude, a: fieldReq.patch.start, b: fieldReq.patch.end})
 							size += fieldReq.size
 
-							if d.left.Entries[fieldReq.outputIdx].Reference.Key == fieldKey {
+							if d.left.Entries[fieldReq.patchSourceIdx].Reference.Key == fieldKey {
 								d.emit(opRec{code: codeReturnIntoObjectSameKeyPop})
 								size += 1
 							} else {
@@ -676,10 +674,11 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		d.reqs[cand.requestIdx].update(patch, size, primaryIdx)
 	}
 
+	// Restore scratch slices; the parent still needs the patches on the tape.
 	d.reqs = d.reqs[:reqsMark]
 	d.candidates = d.candidates[:candidatesMark]
 	d.mapAliases = d.mapAliases[:aliasesMark]
-	d.ranges = d.ranges[:rangesMark]
+	d.requestOffsets = d.requestOffsets[:offsetsMark]
 }
 
 type sliceAlias struct {
@@ -690,7 +689,7 @@ type sliceAlias struct {
 }
 
 func (d *differ) sliceAlias(cand *candidate, pos int) *sliceAlias {
-	return &d.sliceAliases[cand.aliases+pos]
+	return &d.sliceAliases[cand.aliasOffset+pos]
 }
 
 func (d *differ) insertSliceAlias(cand *candidate, target mendoza.Reference, source mendoza.Reference) {
@@ -749,8 +748,9 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 	reqsMark := len(d.reqs)
 	candidatesMark := len(d.candidates)
 	aliasesMark := len(d.sliceAliases)
-	rangesMark := len(d.ranges)
+	offsetsMark := len(d.requestOffsets)
 
+	// Find candidates: arrays only use each request's primary value.
 	for i := reqs.start; i < reqs.end; i++ {
 		req := &d.reqs[i]
 		if !d.left.Entries[req.primaryIdx].IsNonEmptySlice() {
@@ -760,7 +760,7 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 		d.candidates = append(d.candidates, candidate{
 			contextIdx:  req.primaryIdx,
 			requestIdx:  i,
-			aliases:     len(d.sliceAliases),
+			aliasOffset: len(d.sliceAliases),
 			contextIter: d.left.Iter(req.primaryIdx),
 		})
 		for j := 0; j < elementCount; j++ {
@@ -770,6 +770,7 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 
 	candidates := span{candidatesMark, len(d.candidates)}
 
+	// Find exact aliases within each candidate, preserving target order for adjacent slices.
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		elementEntry := it.GetEntry()
 
@@ -789,11 +790,11 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 		}
 	}
 
-	// Now build the requests, one element at a time
-	elementRequests := len(d.ranges)
+	// Build child requests, grouped by target element.
+	elementRequestsOffset := len(d.requestOffsets)
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		elementEntry := it.GetEntry()
-		d.ranges = append(d.ranges, len(d.reqs))
+		d.requestOffsets = append(d.requestOffsets, len(d.reqs))
 
 		for c := candidates.start; c < candidates.end; c++ {
 			cand := &d.candidates[c]
@@ -814,12 +815,14 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 			contextIter.Next()
 		}
 	}
-	d.ranges = append(d.ranges, len(d.reqs))
+	d.requestOffsets = append(d.requestOffsets, len(d.reqs))
 
+	// Reconstruct each target element for its requested contexts.
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		d.reconstruct(it.GetIndex(), d.fieldRequests(elementRequests, it.GetEntry().Reference.Index))
+		d.reconstruct(it.GetIndex(), d.requestsForField(elementRequestsOffset, it.GetEntry().Reference.Index))
 	}
 
+	// Assemble each candidate's patch and keep the cheapest for its request.
 	for c := candidates.start; c < candidates.end; c++ {
 		cand := &d.candidates[c]
 		contextIdx := cand.contextIdx
@@ -840,9 +843,8 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 					startSlice = alias.elementIdx
 				}
 
-				if alias.nextIsAdjacent {
-					// The next one is adjacent. We don't need to do anything!
-				} else {
+				// Emit the slice when the run of adjacent aliases ends.
+				if !alias.nextIsAdjacent {
 					d.emit(opRec{code: codeArrayAppendSlice, a: startSlice, b: alias.elementIdx + 1})
 					size += 3
 					startSlice = -1
@@ -850,7 +852,7 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 			} else {
 				didPatch := false
 
-				elementReqs := d.fieldRequests(elementRequests, pos)
+				elementReqs := d.requestsForField(elementRequestsOffset, pos)
 				for i := elementReqs.start; i < elementReqs.end; i++ {
 					elementReq := &d.reqs[i]
 					if elementReq.contextIdx == contextIdx {
@@ -878,10 +880,11 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 		d.reqs[cand.requestIdx].update(patch, size, contextIdx)
 	}
 
+	// Restore scratch slices; the parent still needs the patches on the tape.
 	d.reqs = d.reqs[:reqsMark]
 	d.candidates = d.candidates[:candidatesMark]
 	d.sliceAliases = d.sliceAliases[:aliasesMark]
-	d.ranges = d.ranges[:rangesMark]
+	d.requestOffsets = d.requestOffsets[:offsetsMark]
 }
 
 // String handling
