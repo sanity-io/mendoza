@@ -30,26 +30,32 @@ $ dozadiff left.json right.json
 
 ## Repeated comparisons in Go
 
-`CreatePatch` and `CreateDoublePatch` allocate fresh working memory on every call. To diff many documents, reuse a
-`Differ` (the zero value uses the default options; use `options.NewDiffer()` for others), and write its result
-straight to a `Writer` without building a `Patch`:
+`CreatePatch` and `CreateDoublePatch` allocate new working memory on every call.
+To diff many documents, reuse a `Differ`.
+The zero value uses the default options, and `Options.NewDiffer` creates one with custom options.
+
+`d.Diff` followed by `d.WriteTo` writes the patch straight to a `mendoza.Writer` without building a `Patch`.
+`Writer` is Mendoza's serialization interface, not `io.Writer`, and the library doesn't export an implementation, so you provide one for your output format.
 
 ```go
 var d mendoza.Differ
-for _, doc := range docs {
-    if err := d.Diff(doc.Left, doc.Right); err != nil {
+for _, pair := range pairs {
+    if err := d.Diff(pair.Left, pair.Right); err != nil {
         return err
     }
-    if err := d.WriteTo(w); err != nil {
+    if err := d.WriteTo(pair.Out); err != nil { // pair.Out implements mendoza.Writer.
         return err
     }
 }
 ```
 
-On Go 1.24+ warmed-up diffs then run without allocating. The result is valid until the next diff. Don't copy a
-`Differ`, share it between goroutines, or mutate the inputs before writing. `d.CreatePatch` and
-`d.CreateDoublePatch` also reuse the working memory but still return a `Patch`, and `d.DiffDouble` with
-`d.WriteReverseTo` writes the reverse patch too.
+On Go 1.24+, warmed-up diffs then run without allocating, apart from anything your writer or convert function allocates.
+The result is valid until the next diff.
+Don't copy a `Differ`, use it from several goroutines at once, or mutate the inputs before writing.
+Its buffers keep the capacity of the largest document it has diffed, so drop the `Differ` to release that memory.
 
-Patches delete object fields in key order. Earlier versions deleted them in random order, so patches created by
-different versions can differ in that order while giving the same result.
+`d.CreatePatch` and `d.CreateDoublePatch` also reuse the working memory, but still return a `Patch`.
+`d.DiffDouble` followed by `d.WriteReverseTo` writes the reverse patch as well.
+
+Object fields are deleted in key order.
+Before `Differ` was added they were deleted in random order, so older patches can differ in that order while producing the same result.
