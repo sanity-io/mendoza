@@ -28,37 +28,28 @@ $ dozadiff left.json right.json
 
 **Format**: See [docs/format.adoc](docs/format.adoc)
 
-## Go API and repeated comparisons
+## Repeated comparisons in Go
 
-`CreatePatch` and `CreateDoublePatch` retain their existing signatures and behavior.
-They are convenience wrappers around `Differ`, and return `Patch` values that can be
-applied with `ApplyPatch` or serialized as before.
-
-For repeated comparisons, reuse a `Differ`:
-
-- `d.CreatePatch(left, right)` and `d.CreateDoublePatch(left, right)` reuse working
-  memory, but still allocate the returned patches and operation objects.
-- `d.Diff(left, right)` followed by `d.WriteTo(w)` writes directly from the internal
-  operation tape, without constructing a `Patch`. The writer implements Mendoza's
-  `Writer` interface, not `io.Writer`.
-- `d.DiffDouble(left, right)` also supports `d.WriteReverseTo(w)`.
+`CreatePatch` and `CreateDoublePatch` allocate fresh working memory on every call. To diff many documents, reuse a
+`Differ` (the zero value uses the default options; use `options.NewDiffer()` for others), and write its result
+straight to a `Writer` without building a `Patch`:
 
 ```go
-d := mendoza.NewDiffer() // Or options.NewDiffer(); reuse across comparisons.
-if err := d.Diff(left, right); err != nil {
-    return err
+var d mendoza.Differ
+for _, doc := range docs {
+    if err := d.Diff(doc.Left, doc.Right); err != nil {
+        return err
+    }
+    if err := d.WriteTo(w); err != nil {
+        return err
+    }
 }
-return d.WriteTo(w)
 ```
 
-A `Differ` must not be copied after first use or shared by concurrent comparisons.
-Every diff replaces both previous tape results, including on error. Writes can be
-repeated until the next diff. Returned `Patch` values survive reuse of the differ,
-although their values may still reference input maps and slices. Do not mutate inputs
-between diffing and writing.
+On Go 1.24+ warmed-up diffs then run without allocating. The result is valid until the next diff. Don't copy a
+`Differ`, share it between goroutines, or mutate the inputs before writing. `d.CreatePatch` and
+`d.CreateDoublePatch` also reuse the working memory but still return a `Patch`, and `d.DiffDouble` with
+`d.WriteReverseTo` writes the reverse patch too.
 
-Working buffers grow as needed and retain their capacity; zero allocations does not
-mean bounded memory. Replace the differ with a new one if you need to release its
-retained buffers. On Go 1.24+ with the default runtime, warmed-up diffs can run with
-zero allocations. Older Go map implementations may allocate while rebuilding the
-index, and custom writers or conversion functions can allocate independently.
+Patches delete object fields in key order. Earlier versions deleted them in random order, so patches created by
+different versions can differ in that order while giving the same result.

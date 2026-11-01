@@ -14,6 +14,7 @@ import (
 // It keeps references to its last documents until the next diff, and retains buffer capacity for reuse.
 // Inputs must not be mutated between diffing and writing the result.
 type Differ struct {
+	noCopy              noCopy
 	options             Options
 	left, right         mendoza.HashList
 	hashIndex           mendoza.HashIndex
@@ -21,12 +22,13 @@ type Differ struct {
 	patch, reversePatch span
 }
 
-// NewDiffer creates a Differ which uses the default options.
-func NewDiffer() *Differ {
-	return DefaultOptions.NewDiffer()
-}
+// noCopy makes go vet's copylocks check report copies of a Differ. A copy would share the original's buffers.
+type noCopy struct{}
 
-// NewDiffer creates a Differ which uses the given options.
+func (*noCopy) Lock()   {}
+func (*noCopy) Unlock() {}
+
+// NewDiffer creates a Differ which uses the given options. A zero Differ uses the default options.
 func (options Options) NewDiffer() *Differ {
 	return &Differ{options: options}
 }

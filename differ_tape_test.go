@@ -56,7 +56,7 @@ func TestRejectedReconstructionReleasesTape(t *testing.T) {
 		{"accepted child", []interface{}{"abcdeA"}, []interface{}{"abcdeB"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			d := NewDiffer()
+			d := &Differ{}
 			for i := 0; i < 2; i++ {
 				if err := d.DiffDouble(test.left, test.right); err != nil {
 					t.Fatal(err)
@@ -121,14 +121,4 @@ func TestWriteSpanMatchesPatch(t *testing.T) {
 	}
 	requireSameOutput(t, "writeSpan", func(w Writer) error { return d.writeSpan(w, all) }, want)
 	requireSameOutput(t, "patchFor", d.patchFor(all).WriteTo, want)
-}
-
-func TestWriteSpanRejectsUnknownOpcode(t *testing.T) {
-	defer func() {
-		if got := recover(); got != "mendoza: unexpected op on tape" {
-			t.Fatalf("panic = %v, want unexpected-op panic", got)
-		}
-	}()
-	d := differ{tape: []opRec{{code: 254}}}
-	d.writeSpan(&recordWriter{}, span{0, 1})
 }

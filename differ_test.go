@@ -126,11 +126,14 @@ func checkPair(t *testing.T, d *Differ, left, right interface{}) {
 	if result := ApplyPatch(left, got); !reflect.DeepEqual(result, right) {
 		t.Fatalf("patch doesn't produce right\nleft   = %v\nright  = %v\nresult = %v", left, right, result)
 	}
+	if result := ApplyPatch(right, reverse); !reflect.DeepEqual(result, left) {
+		t.Fatalf("reverse patch doesn't produce left\nleft   = %v\nright  = %v\nresult = %v", left, right, result)
+	}
 }
 
 func TestMatchesOriginalRandom(t *testing.T) {
 	r := rand.New(rand.NewSource(42))
-	d := NewDiffer()
+	d := &Differ{}
 	for i := 0; i < 20000; i++ {
 		left := norm(randVal(r, 0))
 		right := norm(mutate(r, left, 0))
@@ -139,7 +142,7 @@ func TestMatchesOriginalRandom(t *testing.T) {
 }
 
 func TestMatchesOriginalDocuments(t *testing.T) {
-	d := NewDiffer()
+	d := &Differ{}
 	for _, n := range []int{1, 2, 5, 10, 100, 1000} {
 		checkPair(t, d, makeDoc(n, false), makeDoc(n, true))
 		left, right := heavyPair(n)
@@ -149,7 +152,7 @@ func TestMatchesOriginalDocuments(t *testing.T) {
 }
 
 func TestMatchesOriginalNil(t *testing.T) {
-	d := NewDiffer()
+	d := &Differ{}
 	doc := map[string]interface{}{"a": "b"}
 	checkPair(t, d, nil, nil)
 	checkPair(t, d, nil, doc)
@@ -162,7 +165,7 @@ func TestMatchesOriginalNil(t *testing.T) {
 func TestDifferUnchangedSkipsIndex(t *testing.T) {
 	for _, double := range []bool{false, true} {
 		t.Run(fmt.Sprintf("double=%t", double), func(t *testing.T) {
-			d := NewDiffer()
+			d := &Differ{}
 			left, right := makeDoc(10, false), makeDoc(10, false)
 			if double {
 				if err := d.DiffDouble(left, right); err != nil {
@@ -171,7 +174,7 @@ func TestDifferUnchangedSkipsIndex(t *testing.T) {
 			} else if err := d.Diff(left, right); err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(d.hashIndex, NewDiffer().hashIndex) {
+			if !reflect.DeepEqual(d.hashIndex, (&Differ{}).hashIndex) {
 				t.Fatal("unchanged documents should not build a hash index")
 			}
 			requireSameOutput(t, "unchanged forward", d.WriteTo, Patch{})
@@ -258,7 +261,7 @@ func TestDifferZeroValue(t *testing.T) {
 
 func TestDifferPatchesSurviveReuse(t *testing.T) {
 	left, right := heavyPair(10)
-	d := NewDiffer()
+	d := &Differ{}
 	single, err := d.CreatePatch(left, right)
 	if err != nil {
 		t.Fatal(err)
@@ -313,7 +316,7 @@ func TestDifferDiscardsPreviousResults(t *testing.T) {
 		{"error double", left, invalid, true, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			d := NewDiffer()
+			d := &Differ{}
 			if err := d.DiffDouble(left, right); err != nil {
 				t.Fatal(err)
 			}
@@ -345,7 +348,7 @@ func TestDifferDiscardsPreviousResults(t *testing.T) {
 }
 
 func TestDifferErrors(t *testing.T) {
-	d := NewDiffer()
+	d := &Differ{}
 	valid := map[string]interface{}{"a": "b"}
 	invalid := map[string]interface{}{"a": struct{}{}}
 
@@ -395,7 +398,7 @@ func (w *failingWriter) WriteValue(v interface{}) error { return w.write() }
 
 func TestWriteToReturnsWriterErrors(t *testing.T) {
 	left, right := heavyPair(100)
-	d := NewDiffer()
+	d := &Differ{}
 	forward, reverse, err := d.CreateDoublePatch(left, right)
 	if err != nil {
 		t.Fatal(err)

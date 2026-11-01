@@ -128,7 +128,7 @@ func BenchmarkCreateDoublePatch(b *testing.B) {
 
 func BenchmarkDifferCreatePatch(b *testing.B) {
 	benchPairs(b, func(b *testing.B, left, right interface{}) {
-		d := NewDiffer()
+		d := &Differ{}
 		d.CreatePatch(left, right) // grow the buffers
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -141,7 +141,7 @@ func BenchmarkDifferCreatePatch(b *testing.B) {
 
 func BenchmarkDifferWriteTo(b *testing.B) {
 	benchPairs(b, func(b *testing.B, left, right interface{}) {
-		d := NewDiffer()
+		d := &Differ{}
 		w := &discardWriter{}
 		d.Diff(left, right) // grow the buffers
 		b.ResetTimer()
@@ -161,7 +161,7 @@ func BenchmarkDifferUnchanged(b *testing.B) {
 		left, right := makeDoc(n, false), makeDoc(n, false)
 		for _, double := range []bool{false, true} {
 			b.Run(fmt.Sprintf("double=%t/%d", double, n), func(b *testing.B) {
-				d := NewDiffer()
+				d := &Differ{}
 				diff := d.Diff
 				if double {
 					diff = d.DiffDouble
@@ -187,7 +187,7 @@ func BenchmarkDifferUnchanged(b *testing.B) {
 func BenchmarkDifferSmallAfterLarge(b *testing.B) {
 	for _, n := range []int{0, 1000, 10000, 100000} {
 		b.Run(fmt.Sprint(n), func(b *testing.B) {
-			d := NewDiffer()
+			d := &Differ{}
 			if n > 0 {
 				left, right := make([]interface{}, n), make([]interface{}, n)
 				for i := range left {
@@ -226,7 +226,7 @@ func BenchmarkReplacement(b *testing.B) {
 				}
 			})
 			b.Run("Differ", func(b *testing.B) {
-				d := NewDiffer()
+				d := &Differ{}
 				if err := d.Diff(left, right); err != nil {
 					b.Fatal(err)
 				}
@@ -270,17 +270,4 @@ func BenchmarkNilPatch(b *testing.B) {
 			})
 		})
 	}
-}
-
-func BenchmarkApplyPatch(b *testing.B) {
-	benchPairs(b, func(b *testing.B, left, right interface{}) {
-		patch, err := CreatePatch(left, right)
-		if err != nil {
-			b.Fatal(err)
-		}
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			ApplyPatch(left, patch)
-		}
-	})
 }

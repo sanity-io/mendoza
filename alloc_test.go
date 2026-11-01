@@ -15,7 +15,7 @@ func TestDiffDoesNotAllocate(t *testing.T) {
 		heavy := [2]interface{}{left, right}
 
 		for name, pair := range map[string][2]interface{}{"single": single, "heavy": heavy} {
-			d := NewDiffer()
+			d := &Differ{}
 			w := &discardWriter{}
 			run := func() {
 				if err := d.DiffDouble(pair[0], pair[1]); err != nil {
@@ -67,7 +67,7 @@ func TestNilPatchAllocations(t *testing.T) {
 // one allocation per op.
 func TestCreatePatchAllocations(t *testing.T) {
 	left, right := heavyPair(1000)
-	d := NewDiffer()
+	d := &Differ{}
 	patch, err := d.CreatePatch(left, right)
 	if err != nil {
 		t.Fatal(err)

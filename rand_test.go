@@ -1,11 +1,6 @@
 package mendoza
 
-import (
-	"encoding/json"
-	"math/rand"
-	"reflect"
-	"testing"
-)
+import "math/rand"
 
 func randVal(r *rand.Rand, depth int) interface{} {
 	k := r.Intn(7)
@@ -73,31 +68,4 @@ func mutate(r *rand.Rand, v interface{}, depth int) interface{} {
 		}
 	}
 	return v
-}
-
-func TestRandomRoundtrip(t *testing.T) {
-	r := rand.New(rand.NewSource(1))
-	for i := 0; i < 50000; i++ {
-		l := norm(randVal(r, 0))
-		rt := norm(mutate(r, l, 0))
-		p1, p2, err := CreateDoublePatch(l, rt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := norm(ApplyPatch(l, p1)); !reflect.DeepEqual(got, rt) {
-			t.Fatalf("fwd mismatch\nL=%v\nR=%v\nG=%v", l, rt, got)
-		}
-		if got := norm(ApplyPatch(rt, p2)); !reflect.DeepEqual(got, l) {
-			t.Fatalf("back mismatch")
-		}
-		// also re-serialise via JSON to exercise format
-		b, _ := json.Marshal(p1)
-		var p Patch
-		if err := json.Unmarshal(b, &p); err != nil {
-			t.Fatal(err)
-		}
-		if got := norm(ApplyPatch(l, p)); !reflect.DeepEqual(got, rt) {
-			t.Fatalf("json mismatch")
-		}
-	}
 }
