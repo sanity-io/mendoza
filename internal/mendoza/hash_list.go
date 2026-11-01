@@ -202,6 +202,7 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 	return result, size, nil
 }
 
+// Iter returns an iterator over the children of the entry idx, which must be a non-empty map or slice.
 func (hashList *HashList) Iter(idx int) Iter {
 	return Iter{
 		hashList: hashList,
@@ -209,27 +210,34 @@ func (hashList *HashList) Iter(idx int) Iter {
 	}
 }
 
+// Iter iterates over the children of a map (in key order) or slice. It is a value so it can be stored without
+// allocating.
 type Iter struct {
 	hashList *HashList
 	idx      int
 }
 
+// GetIndex returns the entry index of the current child.
 func (it *Iter) GetIndex() int {
 	return it.idx
 }
 
+// GetEntry returns the current child's entry. The pointer is valid until the list is filled or reset again.
 func (it *Iter) GetEntry() *HashEntry {
 	return &it.hashList.Entries[it.idx]
 }
 
+// GetKey returns the current child's key. It is empty for slice elements.
 func (it *Iter) GetKey() string {
 	return it.GetEntry().Reference.Key
 }
 
+// IsDone reports whether the iterator has moved past the last child.
 func (it *Iter) IsDone() bool {
 	return it.idx == -1
 }
 
+// Next moves to the next child.
 func (it *Iter) Next() {
 	it.idx = it.GetEntry().Sibling
 }

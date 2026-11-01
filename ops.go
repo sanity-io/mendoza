@@ -3,6 +3,9 @@
 // You use CreatePatch (or CreateDoublePatch) to create patches,
 // which can then be applied with ApplyPatch.
 //
+// To create many patches, reuse a Differ. It keeps its working memory between calls,
+// and its Diff and WriteTo methods write a patch without building a Patch.
+//
 // The Patch type is already JSON serializable, but you can implement Reader/Writer
 // (and use WriteTo/ReadFrom) if you need a custom serialization.
 //

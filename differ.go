@@ -6,13 +6,16 @@ import (
 	"github.com/sanity-io/mendoza/internal/mendoza"
 )
 
-// Differ creates patches while reusing its working memory. On Go 1.24+ with the default runtime, warmed-up
-// diffs can run without allocating. Older Go map implementations may still allocate when rebuilding the index.
-// Writers and conversion functions may allocate independently.
+// Differ creates patches while reusing its working memory between calls. Use Diff and WriteTo to write a patch
+// without building a Patch, or CreatePatch to get one.
 //
-// The zero value is ready to use. A Differ must not be copied after first use and is not safe for concurrent use.
-// It keeps references to its last documents until the next diff, and retains buffer capacity for reuse.
-// Inputs must not be mutated between diffing and writing the result.
+// The zero value is ready to use and uses the default options; Options.NewDiffer creates one with other options.
+// A Differ must not be copied after first use and is not safe for concurrent use. It keeps references to its last
+// documents until the next diff, and keeps its buffers' capacity for reuse. Inputs must not be mutated between
+// diffing and writing the result.
+//
+// On Go 1.24+ with the default runtime, warmed-up diffs can run without allocating. Older Go map implementations
+// may still allocate when rebuilding the index, and writers and conversion functions may allocate independently.
 type Differ struct {
 	noCopy              noCopy
 	options             Options
@@ -51,10 +54,10 @@ func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 // Creates a patch which can be applied to the left document to produce the right document.
 //
 // Use a Differ instead to reuse memory between calls.
-//
-// This intentionally creates a new Differ per call rather than pooling them: a pooled Differ would retain the
-// buffers of the largest document it has seen. Callers who want reuse can hold a Differ themselves.
 func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
+	// This intentionally creates a new Differ per call rather than pooling them: a pooled Differ would retain the
+	// buffers of the largest document it has seen. Callers who want reuse can hold a Differ themselves.
+
 	// No working memory is needed when there is no source document.
 	if left == nil {
 		if right == nil {
@@ -81,7 +84,7 @@ func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch
 }
 
 // CreatePatch is like Options.CreatePatch, but reuses the Differ's working memory. The returned Patch and its
-// operations are allocated separately and remain valid across calls. Values in the patch are not deep-copied.
+// operations are allocated separately and remain valid across calls. Values in it are not deep-copied.
 func (d *Differ) CreatePatch(left, right interface{}) (Patch, error) {
 	if err := d.Diff(left, right); err != nil {
 		return nil, err
@@ -90,7 +93,8 @@ func (d *Differ) CreatePatch(left, right interface{}) (Patch, error) {
 }
 
 // CreateDoublePatch is like Options.CreateDoublePatch, but reuses the Differ's working memory. The returned
-// Patches and their operations are allocated separately and remain valid across calls. Values are not deep-copied.
+// patches and their operations are allocated separately and remain valid across calls. Values in them are not
+// deep-copied.
 func (d *Differ) CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 	if err := d.DiffDouble(left, right); err != nil {
 		return nil, nil, err
@@ -100,7 +104,7 @@ func (d *Differ) CreateDoublePatch(left, right interface{}) (Patch, Patch, error
 
 // Diff computes a patch which can be applied to the left document to produce the right document. Use WriteTo to
 // write it out without allocating a Patch. The result is valid until the next diff (including CreatePatch or
-// CreateDoublePatch). Each diff discards both previous results, even if it returns an error.
+// CreateDoublePatch). Each diff discards the previous forward and reverse results, even if it returns an error.
 func (d *Differ) Diff(left, right interface{}) error {
 	d.reset()
 
@@ -144,14 +148,15 @@ func (d *Differ) DiffDouble(left, right interface{}) error {
 	return nil
 }
 
-// WriteTo writes the last forward patch. It can be called repeatedly, including after a writer error.
-// Before a diff or after a failed diff, it writes nothing.
+// WriteTo writes the forward patch from the last Diff or DiffDouble, in the same format as Patch.WriteTo. It can
+// be called repeatedly, including after a writer error. Before a diff or after a failed diff, it writes nothing.
 func (d *Differ) WriteTo(w Writer) error {
 	return d.differ.writeSpan(w, d.patch)
 }
 
-// WriteReverseTo writes the last reverse patch. It can be called repeatedly, including after a writer error.
-// Before DiffDouble, after a forward-only diff, or after a failed diff, it writes nothing.
+// WriteReverseTo writes the reverse patch from the last DiffDouble, in the same format as Patch.WriteTo. It can be
+// called repeatedly, including after a writer error. Before DiffDouble, after a forward-only diff, or after a
+// failed diff, it writes nothing.
 func (d *Differ) WriteReverseTo(w Writer) error {
 	return d.differ.writeSpan(w, d.reversePatch)
 }
