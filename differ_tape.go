@@ -11,6 +11,8 @@ type opRec struct {
 
 // codeInclude is only used on the tape: it stands for all the ops in tape[a:b].
 // Included spans are recorded before their parent patch, so these references cannot form cycles.
+// It shares the uint8 space with the wire opcodes in format.go, which are small iota values; 255 is far from them.
+// It is never written: writeSpan and patchFor expand it.
 const codeInclude uint8 = 255
 
 func (d *differ) emit(op opRec) {
@@ -33,6 +35,9 @@ func (d *differ) valueSpan(value interface{}) span {
 }
 
 // writeSpan writes the ops in tape[sp.start:sp.end] in the same format as Patch.WriteTo.
+//
+// This duplicates the operand encoding of the writeParams methods in format.go on purpose: going through toOp
+// would allocate an Op per record. TestWriteSpanMatchesPatch checks every recordable op against Patch.WriteTo.
 func (d *differ) writeSpan(w Writer, sp span) error {
 	for i := sp.start; i < sp.end; i++ {
 		op := &d.tape[i]

@@ -89,15 +89,51 @@ func TestRejectedStringDoesNotGrowTape(t *testing.T) {
 	}
 }
 
-func TestWriteSpanOperandlessOps(t *testing.T) {
+// TestWriteSpanMatchesPatch keeps the tape encoding in writeSpan and the conversion in toOp in sync with format.go,
+// for every op that can be recorded on the tape.
+func TestWriteSpanMatchesPatch(t *testing.T) {
 	d := differ{tape: []opRec{
+		{code: codeValue, val: "value"},
 		{code: codeBlank},
+		{code: codePushFieldCopy, a: 1},
+		{code: codePushFieldBlank, a: 2},
+		{code: codePushElementCopy, a: 3},
+		{code: codePushElementBlank, a: 4},
+		{code: codeReturnIntoObjectPop, key: "key"},
 		{code: codeReturnIntoObjectSameKeyPop},
 		{code: codeReturnIntoArrayPop},
+		{code: codeObjectSetFieldValue, val: 1.5, key: "set"},
+		{code: codeObjectCopyField, a: 5},
+		{code: codeObjectDeleteField, a: 6},
+		{code: codeArrayAppendValue, val: true},
+		{code: codeArrayAppendSlice, a: 7, b: 8},
+		{code: codeStringAppendString, key: "str"},
+		{code: codeStringAppendSlice, a: 9, b: 10},
 	}}
-	requireSameOutput(t, "operandless operations", func(w Writer) error {
-		return d.writeSpan(w, span{0, len(d.tape)})
-	}, Patch{&OpBlank{}, &OpReturnIntoObjectSameKeyPop{}, &OpReturnIntoArrayPop{}})
+	ops := len(d.tape)
+	d.emit(opRec{code: codeInclude, a: 0, b: ops})
+	all := span{ops, len(d.tape)}
+
+	want := Patch{
+		&OpValue{Value: "value"},
+		&OpBlank{},
+		&OpPushFieldCopy{OpPushField: OpPushField{Index: 1}},
+		&OpPushFieldBlank{OpPushField: OpPushField{Index: 2}},
+		&OpPushElementCopy{OpPushElement: OpPushElement{Index: 3}},
+		&OpPushElementBlank{OpPushElement: OpPushElement{Index: 4}},
+		&OpReturnIntoObjectPop{OpReturnIntoObject: OpReturnIntoObject{Key: "key"}},
+		&OpReturnIntoObjectSameKeyPop{},
+		&OpReturnIntoArrayPop{},
+		&OpObjectSetFieldValue{OpValue: OpValue{Value: 1.5}, OpReturnIntoObject: OpReturnIntoObject{Key: "set"}},
+		&OpObjectCopyField{OpPushField: OpPushField{Index: 5}},
+		&OpObjectDeleteField{Index: 6},
+		&OpArrayAppendValue{Value: true},
+		&OpArrayAppendSlice{Left: 7, Right: 8},
+		&OpStringAppendString{String: "str"},
+		&OpStringAppendSlice{Left: 9, Right: 10},
+	}
+	requireSameOutput(t, "writeSpan", func(w Writer) error { return d.writeSpan(w, all) }, want)
+	requireSameOutput(t, "patchFor", d.patchFor(all).WriteTo, want)
 }
 
 func TestWriteSpanRejectsUnknownOpcode(t *testing.T) {

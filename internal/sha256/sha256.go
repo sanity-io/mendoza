@@ -200,6 +200,10 @@ func (d *Digest) Write(p []byte) (nn int, err error) {
 }
 
 // WriteString is like Write, but avoids the allocation of converting s to a []byte.
+//
+// Unlike Write, it copies every block through d.x instead of hashing full blocks in place. That was benchmarked
+// against Write from 16 B to 64 KB with no measurable difference: hashing dominates the copy. Hashing in place
+// would need unsafe, which is not worth it.
 func (d *Digest) WriteString(s string) {
 	d.len += uint64(len(s))
 	for len(s) > 0 {

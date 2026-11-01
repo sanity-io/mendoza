@@ -49,6 +49,9 @@ func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 // Creates a patch which can be applied to the left document to produce the right document.
 //
 // Use a Differ instead to reuse memory between calls.
+//
+// This intentionally creates a new Differ per call rather than pooling them: a pooled Differ would retain the
+// buffers of the largest document it has seen. Callers who want reuse can hold a Differ themselves.
 func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
 	// No working memory is needed when there is no source document.
 	if left == nil {
@@ -233,13 +236,27 @@ type differ struct {
 	sliceAliases []sliceAlias
 }
 
+// scratchMark records the lengths of the scratch arenas, so a reconstruction can remove what it appended.
+type scratchMark struct {
+	reqs, requestOffsets, candidates, mapAliases, sliceAliases int
+}
+
+func (d *differ) mark() scratchMark {
+	return scratchMark{len(d.reqs), len(d.requestOffsets), len(d.candidates), len(d.mapAliases), len(d.sliceAliases)}
+}
+
+// restore truncates the scratch arenas to m. The tape is not restored: parents still need the patches on it.
+func (d *differ) restore(m scratchMark) {
+	d.reqs = d.reqs[:m.reqs]
+	d.requestOffsets = d.requestOffsets[:m.requestOffsets]
+	d.candidates = d.candidates[:m.candidates]
+	d.mapAliases = d.mapAliases[:m.mapAliases]
+	d.sliceAliases = d.sliceAliases[:m.sliceAliases]
+}
+
 func (d *differ) reset() {
 	d.truncateTape(0)
-	d.reqs = d.reqs[:0]
-	d.requestOffsets = d.requestOffsets[:0]
-	d.candidates = d.candidates[:0]
-	d.mapAliases = d.mapAliases[:0]
-	d.sliceAliases = d.sliceAliases[:0]
+	d.restore(scratchMark{})
 }
 
 func (d *differ) build(left, right *mendoza.HashList, hashIndex *mendoza.HashIndex) span {
@@ -398,8 +415,19 @@ type candidate struct {
 	requestIdx int // Request in d.reqs that this candidate is trying to satisfy.
 	// aliasOffset starts this candidate's range in mapAliases or sliceAliases, one slot per target field/element.
 	aliasOffset int
+	// aliasCount is the number of map alias slots which are set (maps only).
+	aliasCount int
 	// contextIter walks the candidate's fields/elements while the requests are built.
 	contextIter mendoza.Iter
+}
+
+func (d *differ) addCandidate(contextIdx int, requestIdx int, aliasOffset int) {
+	d.candidates = append(d.candidates, candidate{
+		contextIdx:  contextIdx,
+		requestIdx:  requestIdx,
+		aliasOffset: aliasOffset,
+		contextIter: d.left.Iter(contextIdx),
+	})
 }
 
 type mapAlias struct {
@@ -409,12 +437,7 @@ type mapAlias struct {
 }
 
 func (d *differ) addMapCandidate(contextIdx int, requestIdx int, fieldCount int) {
-	d.candidates = append(d.candidates, candidate{
-		contextIdx:  contextIdx,
-		requestIdx:  requestIdx,
-		aliasOffset: len(d.mapAliases),
-		contextIter: d.left.Iter(contextIdx),
-	})
+	d.addCandidate(contextIdx, requestIdx, len(d.mapAliases))
 	for i := 0; i < fieldCount; i++ {
 		d.mapAliases = append(d.mapAliases, mapAlias{})
 	}
@@ -426,6 +449,11 @@ func (d *differ) mapAlias(cand *candidate, target mendoza.Reference) *mapAlias {
 
 func (d *differ) insertMapAlias(cand *candidate, target mendoza.Reference, source mendoza.Reference) {
 	current := d.mapAlias(cand, target)
+
+	// Every path below sets an unset slot.
+	if !current.ok {
+		cand.aliasCount++
+	}
 
 	if target.Key == source.Key {
 		*current = mapAlias{
@@ -494,11 +522,8 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 	entry := &d.right.Entries[idx]
 	fieldCount := len(entry.Value.(map[string]interface{}))
 
-	// Everything appended to these is removed again before returning.
-	reqsMark := len(d.reqs)
-	candidatesMark := len(d.candidates)
-	aliasesMark := len(d.mapAliases)
-	offsetsMark := len(d.requestOffsets)
+	// Everything appended to the scratch arenas is removed again before returning.
+	mark := d.mark()
 
 	// Find candidates: start with each request's primary value.
 	for i := reqs.start; i < reqs.end; i++ {
@@ -533,7 +558,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		}
 	}
 
-	candidates := span{candidatesMark, len(d.candidates)}
+	candidates := span{mark.candidates, len(d.candidates)}
 
 	// Find exact aliases within each candidate.
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
@@ -603,17 +628,11 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		size := 0
 		patchStart := len(d.tape)
 
-		removeCount := d.removedFields(primaryIdx, idx, false)
-		aliasCount := 0
-		for i := 0; i < fieldCount; i++ {
-			if d.mapAliases[cand.aliasOffset+i].ok {
-				aliasCount++
-			}
-		}
-
 		// Start from a copy when fewer deletes than aliases are needed. This is only an estimate:
 		// same-key aliases are cheaper than renamed aliases, but both count equally here.
-		isCopy := removeCount < aliasCount
+		// removedFields is walked twice on purpose: the count decides between enterCopy and enterBlank, which must
+		// be on the tape before the deletes are emitted.
+		isCopy := d.removedFields(primaryIdx, idx, false) < cand.aliasCount
 
 		if isCopy {
 			d.enterCopy(primaryIdx)
@@ -670,11 +689,7 @@ func (d *differ) reconstructMap(idx int, reqs span) {
 		d.updateRequest(cand.requestIdx, patch, size, primaryIdx)
 	}
 
-	// Restore scratch slices; the parent still needs the patches on the tape.
-	d.reqs = d.reqs[:reqsMark]
-	d.candidates = d.candidates[:candidatesMark]
-	d.mapAliases = d.mapAliases[:aliasesMark]
-	d.requestOffsets = d.requestOffsets[:offsetsMark]
+	d.restore(mark)
 }
 
 type sliceAlias struct {
@@ -682,6 +697,13 @@ type sliceAlias struct {
 	elementIdx     int
 	prevIsAdjacent bool
 	nextIsAdjacent bool
+}
+
+func (d *differ) addSliceCandidate(contextIdx int, requestIdx int, elementCount int) {
+	d.addCandidate(contextIdx, requestIdx, len(d.sliceAliases))
+	for i := 0; i < elementCount; i++ {
+		d.sliceAliases = append(d.sliceAliases, sliceAlias{})
+	}
 }
 
 func (d *differ) sliceAlias(cand *candidate, pos int) *sliceAlias {
@@ -740,11 +762,8 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 	entry := &d.right.Entries[idx]
 	elementCount := len(entry.Value.([]interface{}))
 
-	// Everything appended to these is removed again before returning.
-	reqsMark := len(d.reqs)
-	candidatesMark := len(d.candidates)
-	aliasesMark := len(d.sliceAliases)
-	offsetsMark := len(d.requestOffsets)
+	// Everything appended to the scratch arenas is removed again before returning.
+	mark := d.mark()
 
 	// Find candidates: arrays only use each request's primary value.
 	for i := reqs.start; i < reqs.end; i++ {
@@ -753,18 +772,10 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 			continue
 		}
 
-		d.candidates = append(d.candidates, candidate{
-			contextIdx:  req.primaryIdx,
-			requestIdx:  i,
-			aliasOffset: len(d.sliceAliases),
-			contextIter: d.left.Iter(req.primaryIdx),
-		})
-		for j := 0; j < elementCount; j++ {
-			d.sliceAliases = append(d.sliceAliases, sliceAlias{})
-		}
+		d.addSliceCandidate(req.primaryIdx, i, elementCount)
 	}
 
-	candidates := span{candidatesMark, len(d.candidates)}
+	candidates := span{mark.candidates, len(d.candidates)}
 
 	// Find exact aliases within each candidate, preserving target order for adjacent slices.
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
@@ -865,11 +876,7 @@ func (d *differ) reconstructSlice(idx int, reqs span) {
 		d.updateRequest(cand.requestIdx, patch, size, contextIdx)
 	}
 
-	// Restore scratch slices; the parent still needs the patches on the tape.
-	d.reqs = d.reqs[:reqsMark]
-	d.candidates = d.candidates[:candidatesMark]
-	d.sliceAliases = d.sliceAliases[:aliasesMark]
-	d.requestOffsets = d.requestOffsets[:offsetsMark]
+	d.restore(mark)
 }
 
 // String handling
