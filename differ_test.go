@@ -216,7 +216,7 @@ func TestConvertFunc(t *testing.T) {
 	}
 }
 
-func TestRequestForContext(t *testing.T) {
+func TestChildPatch(t *testing.T) {
 	d := differ{reqs: []request{
 		{contextIdx: 0, hasPatch: true},
 		{contextIdx: 1},
@@ -229,7 +229,7 @@ func TestRequestForContext(t *testing.T) {
 		contextIdx int
 		wantIdx    int
 	}{
-		{"first match without patch", span{1, 4}, 1, 1},
+		{"first match without patch hides a later match", span{1, 4}, 1, -1},
 		{"first match with patch", span{2, 4}, 1, 2},
 		{"missing", span{0, 4}, 3, -1},
 		{"before range", span{1, 4}, 0, -1},
@@ -241,8 +241,8 @@ func TestRequestForContext(t *testing.T) {
 			if test.wantIdx >= 0 {
 				want = &d.reqs[test.wantIdx]
 			}
-			if got := d.requestForContext(test.reqs, test.contextIdx); got != want {
-				t.Fatalf("request = %v, want first match at index %d", got, test.wantIdx)
+			if got := d.childPatch(test.reqs, test.contextIdx); got != want {
+				t.Fatalf("request = %v, want index %d", got, test.wantIdx)
 			}
 		})
 	}

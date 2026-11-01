@@ -40,10 +40,26 @@ func (hashList *HashList) Reset() {
 	hashList.convertFunc = nil
 
 	// The stack is normally empty already, but not if the previous document failed with an error.
-	for i := range hashList.keys {
+	hashList.popKeys(0)
+}
+
+// pushSortedKeys pushes the keys of m onto the key stack in sorted order, and returns where they start. Index into
+// the stack rather than holding a sub-slice, since pushes for nested maps may reallocate it.
+func (hashList *HashList) pushSortedKeys(m map[string]interface{}) int {
+	start := len(hashList.keys)
+	for key := range m {
+		hashList.keys = append(hashList.keys, key)
+	}
+	sort.Strings(hashList.keys[start:])
+	return start
+}
+
+// popKeys removes the keys from start onwards, clearing them so the stack doesn't keep the document alive.
+func (hashList *HashList) popKeys(start int) {
+	for i := start; i < len(hashList.keys); i++ {
 		hashList.keys[i] = ""
 	}
-	hashList.keys = hashList.keys[:0]
+	hashList.keys = hashList.keys[:start]
 }
 
 type Reference struct {
@@ -119,14 +135,7 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 		size = len(obj) + 1
 	case map[string]interface{}:
 		hasher := HasherMap
-
-		// The keys are pushed onto the shared stack. Index into it rather than holding a sub-slice since the
-		// recursive calls below may grow (and reallocate) it.
-		keysStart := len(hashList.keys)
-		for key := range obj {
-			hashList.keys = append(hashList.keys, key)
-		}
-		sort.Strings(hashList.keys[keysStart:])
+		keysStart := hashList.pushSortedKeys(obj)
 
 		prevIdx := -1
 
@@ -152,10 +161,7 @@ func (hashList *HashList) process(parent int, ref Reference, obj interface{}) (r
 			xorHash.Xor(valueHash)
 		}
 
-		for i := keysStart; i < len(hashList.keys); i++ {
-			hashList.keys[i] = ""
-		}
-		hashList.keys = hashList.keys[:keysStart]
+		hashList.popKeys(keysStart)
 
 		result = hasher.Sum()
 	case []interface{}:

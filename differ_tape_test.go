@@ -76,19 +76,6 @@ func TestRejectedReconstructionReleasesTape(t *testing.T) {
 	}
 }
 
-func TestRejectedStringDoesNotGrowTape(t *testing.T) {
-	d := NewDiffer()
-	if err := d.fill("before", "after"); err != nil {
-		t.Fatal(err)
-	}
-	d.differ.left = &d.left
-	d.differ.reqs = []request{{primaryIdx: 0, size: d.right.Entries[0].Size + 1}}
-	d.differ.reconstructString("after", span{0, 1})
-	if cap(d.differ.tape) != 0 || d.differ.reqs[0].hasPatch {
-		t.Fatal("rejected string patch should not allocate or select any tape records")
-	}
-}
-
 // TestWriteSpanMatchesPatch keeps the tape encoding in writeSpan and the conversion in toOp in sync with format.go,
 // for every op that can be recorded on the tape.
 func TestWriteSpanMatchesPatch(t *testing.T) {

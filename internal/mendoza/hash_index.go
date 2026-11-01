@@ -14,12 +14,6 @@ type HashIndex struct {
 type chain struct{ head, tail int }
 type node struct{ idx, next int }
 
-func NewHashIndex(hashList *HashList) *HashIndex {
-	hashIndex := &HashIndex{}
-	hashIndex.Build(hashList)
-	return hashIndex
-}
-
 // Build (re)builds the index for hashList, reusing the memory of any previous build.
 func (hashIndex *HashIndex) Build(hashList *HashList) {
 	if hashIndex.data == nil {
