@@ -75,11 +75,12 @@ func TestFillAfterError(t *testing.T) {
 }
 
 // naiveIndex builds the index the obvious way, to compare HashIndex against.
-func naiveIndex(hashList *HashList) (map[Hash][]int, map[Hash][]int) {
-	data := map[Hash][]int{}
+func naiveIndex(hashList *HashList) (map[childKey][]int, map[Hash][]int) {
+	children := map[childKey][]int{}
 	xorData := map[Hash][]int{}
 	for idx, entry := range hashList.Entries {
-		data[entry.Hash] = append(data[entry.Hash], idx)
+		key := childKey{parent: entry.Parent, hash: entry.Hash}
+		children[key] = append(children[key], idx)
 		if entry.XorHash.IsNull() {
 			continue
 		}
@@ -91,7 +92,7 @@ func naiveIndex(hashList *HashList) (map[Hash][]int, map[Hash][]int) {
 			}
 		}
 	}
-	return data, xorData
+	return children, xorData
 }
 
 func collect(it ChainIter) []int {
@@ -114,15 +115,15 @@ func TestHashIndexMatchesNaiveIndex(t *testing.T) {
 				t.Fatal(err)
 			}
 			index.Build(list)
-			data, xorData := naiveIndex(list)
+			children, xorData := naiveIndex(list)
 
-			if len(index.data) != len(data) || len(index.xorData) != len(xorData) {
-				t.Errorf("doc %d: index has %d/%d hashes, want %d/%d",
-					i, len(index.data), len(index.xorData), len(data), len(xorData))
+			if len(index.children) != len(children) || len(index.xorData) != len(xorData) {
+				t.Errorf("doc %d: index has %d/%d keys, want %d/%d",
+					i, len(index.children), len(index.xorData), len(children), len(xorData))
 			}
-			for hash, want := range data {
-				if got := collect(index.Lookup(hash)); !reflect.DeepEqual(got, want) {
-					t.Errorf("doc %d: Lookup = %v, want %v", i, got, want)
+			for key, want := range children {
+				if got := collect(index.LookupChild(key.parent, key.hash)); !reflect.DeepEqual(got, want) {
+					t.Errorf("doc %d: LookupChild(%d) = %v, want %v", i, key.parent, got, want)
 				}
 			}
 			for hash, want := range xorData {
@@ -130,8 +131,14 @@ func TestHashIndexMatchesNaiveIndex(t *testing.T) {
 					t.Errorf("doc %d: LookupXor = %v, want %v", i, got, want)
 				}
 			}
-			if got := collect(index.Lookup(Hash{})); got != nil {
-				t.Errorf("doc %d: Lookup of a missing hash = %v, want nothing", i, got)
+			if got := collect(index.LookupChild(0, Hash{})); got != nil {
+				t.Errorf("doc %d: LookupChild of a missing hash = %v, want nothing", i, got)
+			}
+			// A matching hash under another parent must not be returned.
+			for key := range children {
+				if got := collect(index.LookupChild(key.parent+len(list.Entries), key.hash)); got != nil {
+					t.Errorf("doc %d: LookupChild under a missing parent = %v, want nothing", i, got)
+				}
 			}
 		}
 	}

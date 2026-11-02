@@ -1,14 +1,21 @@
 package mendoza
 
-// HashIndex maps a hash to the entries with that hash, in ascending order.
+// HashIndex looks up entries of a document by hash. Every lookup returns entries in ascending order.
 //
 // Each list is stored as a linked chain in a shared node slice instead of as a
 // []int per hash. Build reuses the nodes and map storage when the index is
 // rebuilt for another document, though older Go map implementations may still allocate.
 type HashIndex struct {
-	data    map[Hash]chain
-	xorData map[Hash]chain
-	nodes   []node
+	children map[childKey]chain
+	xorData  map[Hash]chain
+	nodes    []node
+}
+
+// childKey identifies the children of parent whose hash is hash. Keying by parent keeps lookups proportional to
+// the matches in one container, even when a value (such as a repeated "_type") occurs throughout the document.
+type childKey struct {
+	parent int
+	hash   Hash
 }
 
 type chain struct{ head, tail int }
@@ -16,24 +23,20 @@ type node struct{ idx, next int }
 
 // Build (re)builds the index for hashList, reusing the memory of any previous build.
 func (hashIndex *HashIndex) Build(hashList *HashList) {
-	if hashIndex.data == nil {
-		hashIndex.data = map[Hash]chain{}
+	if hashIndex.children == nil {
+		hashIndex.children = map[childKey]chain{}
 		hashIndex.xorData = map[Hash]chain{}
 	}
 	// Maps never shrink, but clearing a map that once held a large document stays cheap: with Go 1.24+ maps,
-	// range+delete (and clear) over 100k of retained capacity measured ~0.35µs. Re-making the maps when they are
-	// oversized would allocate on every large/small alternation, so they are kept.
-	for key := range hashIndex.data {
-		delete(hashIndex.data, key)
-	}
-	for key := range hashIndex.xorData {
-		delete(hashIndex.xorData, key)
-	}
+	// clearing 100k of retained capacity measured ~0.35µs. Re-making the maps when they are oversized would
+	// allocate on every large/small alternation, so they are kept.
+	clear(hashIndex.children)
+	clear(hashIndex.xorData)
 	hashIndex.nodes = hashIndex.nodes[:0]
 
 	for idx := range hashList.Entries {
 		entry := &hashList.Entries[idx]
-		hashIndex.push(hashIndex.data, entry.Hash, idx)
+		pushChain(hashIndex, hashIndex.children, childKey{parent: entry.Parent, hash: entry.Hash}, idx)
 
 		if !entry.XorHash.IsNull() {
 			for it := hashList.Iter(idx); !it.IsDone(); it.Next() {
@@ -45,13 +48,13 @@ func (hashIndex *HashIndex) Build(hashList *HashList) {
 					continue
 				}
 
-				hashIndex.push(hashIndex.xorData, xorHash, idx)
+				pushChain(hashIndex, hashIndex.xorData, xorHash, idx)
 			}
 		}
 	}
 }
 
-func (hashIndex *HashIndex) push(m map[Hash]chain, key Hash, idx int) {
+func pushChain[K comparable](hashIndex *HashIndex, m map[K]chain, key K, idx int) {
 	n := len(hashIndex.nodes)
 	hashIndex.nodes = append(hashIndex.nodes, node{idx: idx, next: -1})
 	if current, ok := m[key]; ok {
@@ -63,17 +66,17 @@ func (hashIndex *HashIndex) push(m map[Hash]chain, key Hash, idx int) {
 	}
 }
 
-// Lookup returns the entries whose hash is key.
-func (hashIndex *HashIndex) Lookup(key Hash) ChainIter {
-	return hashIndex.iter(hashIndex.data, key)
+// LookupChild returns the children of the map or slice entry parent whose hash is key.
+func (hashIndex *HashIndex) LookupChild(parent int, key Hash) ChainIter {
+	return iterChain(hashIndex, hashIndex.children, childKey{parent: parent, hash: key})
 }
 
 // LookupXor returns the entries which have a field that, when removed, makes their XorHash equal to key.
 func (hashIndex *HashIndex) LookupXor(key Hash) ChainIter {
-	return hashIndex.iter(hashIndex.xorData, key)
+	return iterChain(hashIndex, hashIndex.xorData, key)
 }
 
-func (hashIndex *HashIndex) iter(m map[Hash]chain, key Hash) ChainIter {
+func iterChain[K comparable](hashIndex *HashIndex, m map[K]chain, key K) ChainIter {
 	if current, ok := m[key]; ok {
 		return ChainIter{nodes: hashIndex.nodes, cur: current.head}
 	}

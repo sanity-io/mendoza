@@ -351,18 +351,19 @@ func (d *differ) reconstructChildren(idx int, offset int) {
 }
 
 // findAliases records, for each candidate, which of its children equal a child of the target idx.
+//
+// Aliases are inserted target child by target child, and for each one in ascending order of the candidate's
+// matching children: insertSliceAlias depends on the previous target slot being final, and both insert functions
+// break ties by visiting order. Candidates have separate alias slots, so their order doesn't matter.
 func (d *differ) findAliases(idx int, candidates span) {
 	isMap := d.right.Entries[idx].IsNonEmptyMap()
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		entry := it.GetEntry()
-		others := d.hashIndex.Lookup(entry.Hash)
-		for otherIdx, ok := others.Next(); ok; otherIdx, ok = others.Next() {
-			other := &d.left.Entries[otherIdx]
-			for c := candidates.start; c < candidates.end; c++ {
-				cand := &d.candidates[c]
-				if cand.contextIdx != other.Parent {
-					continue
-				}
+		for c := candidates.start; c < candidates.end; c++ {
+			cand := &d.candidates[c]
+			others := d.hashIndex.LookupChild(cand.contextIdx, entry.Hash)
+			for otherIdx, ok := others.Next(); ok; otherIdx, ok = others.Next() {
+				other := &d.left.Entries[otherIdx]
 				if isMap {
 					d.insertMapAlias(cand, entry.Reference, other.Reference)
 				} else {

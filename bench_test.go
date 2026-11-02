@@ -181,6 +181,31 @@ func BenchmarkDifferUnchanged(b *testing.B) {
 	}
 }
 
+// BenchmarkDifferScaling checks that diff time grows roughly linearly with document size. Every block repeats values
+// such as "_type": "block", so a search for aliases across the whole document would make this quadratic.
+func BenchmarkDifferScaling(b *testing.B) {
+	for _, n := range []int{1000, 4000, 8000} {
+		left, right := heavyPair(n)
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			d := &Differ{}
+			w := &discardWriter{}
+			if err := d.Diff(left, right); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := d.Diff(left, right); err != nil {
+					b.Fatal(err)
+				}
+				if err := d.WriteTo(w); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkDifferSmallAfterLarge measures steady-state small diffs after a large diff has grown the arenas.
 // Exclude the first small diff: releasing references to the large documents once is expected, but subsequent
 // small diffs should not keep clearing the unused capacity of those arenas.
