@@ -75,9 +75,9 @@ func TestFillAfterError(t *testing.T) {
 }
 
 // naiveIndex builds the index the obvious way, to compare HashIndex against.
-func naiveIndex(hashList *HashList) (map[childKey][]int, map[Hash][]int) {
+func naiveIndex(hashList *HashList) (map[childKey][]int, map[childKey][]int) {
 	children := map[childKey][]int{}
-	xorData := map[Hash][]int{}
+	xorData := map[childKey][]int{}
 	for idx, entry := range hashList.Entries {
 		key := childKey{parent: entry.Parent, hash: entry.Hash}
 		children[key] = append(children[key], idx)
@@ -85,10 +85,10 @@ func naiveIndex(hashList *HashList) (map[childKey][]int, map[Hash][]int) {
 			continue
 		}
 		for it := hashList.Iter(idx); !it.IsDone(); it.Next() {
-			xorHash := entry.XorHash
-			xorHash.Xor(it.GetEntry().Hash)
-			if current := xorData[xorHash]; len(current) == 0 || current[len(current)-1] != idx {
-				xorData[xorHash] = append(current, idx)
+			xorKey := childKey{parent: entry.Parent, hash: entry.XorHash}
+			xorKey.hash.Xor(it.GetEntry().Hash)
+			if current := xorData[xorKey]; len(current) == 0 || current[len(current)-1] != idx {
+				xorData[xorKey] = append(current, idx)
 			}
 		}
 	}
@@ -126,9 +126,12 @@ func TestHashIndexMatchesNaiveIndex(t *testing.T) {
 					t.Errorf("doc %d: LookupChild(%d) = %v, want %v", i, key.parent, got, want)
 				}
 			}
-			for hash, want := range xorData {
-				if got := collect(index.LookupXor(hash)); !reflect.DeepEqual(got, want) {
-					t.Errorf("doc %d: LookupXor = %v, want %v", i, got, want)
+			for key, want := range xorData {
+				if got := collect(index.LookupXor(key.parent, key.hash)); !reflect.DeepEqual(got, want) {
+					t.Errorf("doc %d: LookupXor(%d) = %v, want %v", i, key.parent, got, want)
+				}
+				if got := collect(index.LookupXor(key.parent+len(list.Entries), key.hash)); got != nil {
+					t.Errorf("doc %d: LookupXor under a missing parent = %v, want nothing", i, got)
 				}
 			}
 			if got := collect(index.LookupChild(0, Hash{})); got != nil {

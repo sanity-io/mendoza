@@ -57,6 +57,28 @@ func heavyPair(n int) (map[string]interface{}, map[string]interface{}) {
 	return l, r
 }
 
+// keylessSpanPair creates documents whose blocks have three spans without _key, and edits one span per block.
+// Every span then differs from every other only by its text, so a span's xor candidates are all spans with the same
+// parent, but would be every span in the document without keying the xor index by parent.
+func keylessSpanPair(n int) (interface{}, interface{}) {
+	doc := func(edit bool) interface{} {
+		blocks := make([]interface{}, n)
+		for i := range blocks {
+			spans := make([]interface{}, 3)
+			for j := range spans {
+				text := fmt.Sprintf("text %d %d", i, j)
+				if edit && j == 1 {
+					text += "!"
+				}
+				spans[j] = map[string]interface{}{"_type": "span", "marks": []interface{}{}, "text": text}
+			}
+			blocks[i] = map[string]interface{}{"_type": "block", "_key": fmt.Sprint(i), "children": spans}
+		}
+		return norm(map[string]interface{}{"body": blocks})
+	}
+	return doc(false), doc(true)
+}
+
 // replacementPair has no reusable string prefixes or suffixes. Reconstruction loses to
 // literal replacement, exercising the cost and memory usage of rejected patches.
 func replacementPair(n int) (interface{}, interface{}) {
@@ -186,24 +208,32 @@ func BenchmarkDifferUnchanged(b *testing.B) {
 func BenchmarkDifferScaling(b *testing.B) {
 	for _, n := range []int{1000, 4000, 8000} {
 		left, right := heavyPair(n)
-		b.Run(fmt.Sprint(n), func(b *testing.B) {
-			d := &Differ{}
-			w := &discardWriter{}
+		benchDifferScaling(b, fmt.Sprint(n), left, right)
+	}
+	for _, n := range []int{1000, 4000, 8000} {
+		left, right := keylessSpanPair(n)
+		benchDifferScaling(b, fmt.Sprintf("keyless/%d", n), left, right)
+	}
+}
+
+func benchDifferScaling(b *testing.B, name string, left, right interface{}) {
+	b.Run(name, func(b *testing.B) {
+		d := &Differ{}
+		w := &discardWriter{}
+		if err := d.Diff(left, right); err != nil {
+			b.Fatal(err)
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
 			if err := d.Diff(left, right); err != nil {
 				b.Fatal(err)
 			}
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				if err := d.Diff(left, right); err != nil {
-					b.Fatal(err)
-				}
-				if err := d.WriteTo(w); err != nil {
-					b.Fatal(err)
-				}
+			if err := d.WriteTo(w); err != nil {
+				b.Fatal(err)
 			}
-		})
-	}
+		}
+	})
 }
 
 // BenchmarkDifferSmallAfterLarge measures steady-state small diffs after a large diff has grown the arenas.

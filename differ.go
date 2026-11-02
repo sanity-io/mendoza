@@ -592,11 +592,13 @@ func (d *differ) findMapCandidates(idx int, reqs span) span {
 		xorHash := entry.XorHash
 		xorHash.Xor(it.GetEntry().Hash)
 
-		others := d.hashIndex.LookupXor(xorHash)
-		for otherIdx, ok := others.Next(); ok; otherIdx, ok = others.Next() {
-			parent := d.left.Entries[otherIdx].Parent
-			for i := reqs.start; i < reqs.end; i++ {
-				if req := &d.reqs[i]; parent == req.contextIdx && otherIdx != req.primaryIdx {
+		// Each request has its own candidate list, so looking up per request keeps every request's candidates in
+		// ascending order, as a single document-wide lookup would.
+		for i := reqs.start; i < reqs.end; i++ {
+			req := &d.reqs[i]
+			others := d.hashIndex.LookupXor(req.contextIdx, xorHash)
+			for otherIdx, ok := others.Next(); ok; otherIdx, ok = others.Next() {
+				if otherIdx != req.primaryIdx {
 					d.addMapCandidate(otherIdx, i, fieldCount)
 				}
 			}

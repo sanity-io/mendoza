@@ -148,6 +148,9 @@ func TestMatchesOriginalDocuments(t *testing.T) {
 		left, right := heavyPair(n)
 		checkPair(t, d, left, right)
 		checkPair(t, d, right, left)
+		left2, right2 := keylessSpanPair(n)
+		checkPair(t, d, left2, right2)
+		checkPair(t, d, right2, left2)
 	}
 }
 

@@ -7,12 +7,13 @@ package mendoza
 // rebuilt for another document, though older Go map implementations may still allocate.
 type HashIndex struct {
 	children map[childKey]chain
-	xorData  map[Hash]chain
+	xorData  map[childKey]chain
 	nodes    []node
 }
 
-// childKey identifies the children of parent whose hash is hash. Keying by parent keeps lookups proportional to
-// the matches in one container, even when a value (such as a repeated "_type") occurs throughout the document.
+// childKey identifies the children of parent whose hash (or xor hash) is hash. Keying by parent keeps lookups
+// proportional to the matches in one container, even when a value (such as a repeated "_type") occurs throughout
+// the document.
 type childKey struct {
 	parent int
 	hash   Hash
@@ -25,7 +26,7 @@ type node struct{ idx, next int }
 func (hashIndex *HashIndex) Build(hashList *HashList) {
 	if hashIndex.children == nil {
 		hashIndex.children = map[childKey]chain{}
-		hashIndex.xorData = map[Hash]chain{}
+		hashIndex.xorData = map[childKey]chain{}
 	}
 	// Maps never shrink, but clearing a map that once held a large document stays cheap: with Go 1.24+ maps,
 	// clearing 100k of retained capacity measured ~0.35µs. Re-making the maps when they are oversized would
@@ -46,16 +47,16 @@ func (hashIndex *HashIndex) Build(hashList *HashList) {
 
 		if !entry.XorHash.IsNull() {
 			for it := hashList.Iter(idx); !it.IsDone(); it.Next() {
-				xorHash := entry.XorHash
-				xorHash.Xor(it.GetEntry().Hash)
+				xorKey := childKey{parent: entry.Parent, hash: entry.XorHash}
+				xorKey.hash.Xor(it.GetEntry().Hash)
 
-				current, ok := hashIndex.xorData[xorHash]
+				current, ok := hashIndex.xorData[xorKey]
 				if ok && hashIndex.nodes[current.tail].idx == idx {
 					// Already present.
 					continue
 				}
 
-				hashIndex.xorData[xorHash] = hashIndex.pushChain(current, ok, idx)
+				hashIndex.xorData[xorKey] = hashIndex.pushChain(current, ok, idx)
 			}
 		}
 	}
@@ -79,9 +80,9 @@ func (hashIndex *HashIndex) LookupChild(parent int, key Hash) ChainIter {
 	return hashIndex.iterChain(current, ok)
 }
 
-// LookupXor returns the entries which have a field that, when removed, makes their XorHash equal to key.
-func (hashIndex *HashIndex) LookupXor(key Hash) ChainIter {
-	current, ok := hashIndex.xorData[key]
+// LookupXor returns the children of parent which have a field that, when removed, makes their XorHash equal to key.
+func (hashIndex *HashIndex) LookupXor(parent int, key Hash) ChainIter {
+	current, ok := hashIndex.xorData[childKey{parent: parent, hash: key}]
 	return hashIndex.iterChain(current, ok)
 }
 
