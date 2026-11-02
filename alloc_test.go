@@ -48,11 +48,11 @@ func TestNilPatchAllocations(t *testing.T) {
 		run       func()
 		maxAllocs float64
 	}{
-		{"empty", func() { CreatePatch(nil, nil) }, 0},
-		{"insert", func() { CreatePatch(nil, "insert") }, 2},
-		{"double empty", func() { CreateDoublePatch(nil, nil) }, 0},
-		{"double insert", func() { CreateDoublePatch(nil, "insert") }, 4},
-		{"double delete", func() { CreateDoublePatch("delete", nil) }, 4},
+		{"empty", func() { _, _ = CreatePatch(nil, nil) }, 0},
+		{"insert", func() { _, _ = CreatePatch(nil, "insert") }, 2},
+		{"double empty", func() { _, _, _ = CreateDoublePatch(nil, nil) }, 0},
+		{"double insert", func() { _, _, _ = CreateDoublePatch(nil, "insert") }, 4},
+		{"double delete", func() { _, _, _ = CreateDoublePatch("delete", nil) }, 4},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			// Only the returned slices and OpValues may allocate; no Differ or tape.

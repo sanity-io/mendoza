@@ -23,7 +23,6 @@ type fieldEntry struct {
 }
 
 type patcher struct {
-	root        interface{}
 	inputStack  []inputEntry
 	outputStack []outputEntry
 	options     *Options
@@ -90,10 +89,6 @@ func (patcher *patcher) popOutput() {
 }
 
 func (patcher *patcher) inputEntry() *inputEntry {
-	if len(patcher.inputStack) == 0 {
-
-	}
-
 	return &patcher.inputStack[len(patcher.inputStack)-1]
 }
 
@@ -144,14 +139,6 @@ func (entry *inputEntry) getField(idx int) (fieldEntry, error) {
 	}
 
 	return entry.fields[idx], nil
-}
-
-func (patcher *patcher) inputObject() (map[string]interface{}, error) {
-	obj, ok := patcher.inputEntry().value.(map[string]interface{})
-	if !ok {
-		return nil, ErrInvalidPatch
-	}
-	return obj, nil
 }
 
 func (patcher *patcher) inputArray() ([]interface{}, error) {

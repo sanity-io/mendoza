@@ -9,15 +9,16 @@
 // The Patch type is already JSON serializable, but you can implement Reader/Writer
 // (and use WriteTo/ReadFrom) if you need a custom serialization.
 //
-// Supported types
+// # Supported types
 //
 // The differ/patcher is only implemented to work on the following types:
-//  bool
-//  float64
-//  string
-//  map[string]interface{}
-//  []interface{}
-//  nil
+//
+//	bool
+//	float64
+//	string
+//	map[string]interface{}
+//	[]interface{}
+//	nil
 //
 // If you need to support additional types you can use the option WithConvertFunc which
 // defines a function that is applied to every value.
@@ -41,7 +42,6 @@ type Op interface {
 // A patch is a list of operations.
 type Patch []Op
 
-
 // Output stack operators
 
 type OpValue struct {
@@ -63,7 +63,6 @@ type OpReturnIntoObjectSameKey struct {
 
 type OpReturnIntoArray struct {
 }
-
 
 // Input stack operators
 
@@ -133,7 +132,6 @@ type OpObjectCopyField struct {
 	OpPop
 }
 
-//
 type OpObjectDeleteField struct {
 	Index int
 }

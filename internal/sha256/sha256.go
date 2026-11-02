@@ -95,7 +95,7 @@ func (d *Digest) UnmarshalBinary(b []byte) error {
 	b, d.h[6] = consumeUint32(b)
 	b, d.h[7] = consumeUint32(b)
 	b = b[copy(d.x[:], b):]
-	b, d.len = consumeUint64(b)
+	_, d.len = consumeUint64(b)
 	d.nx = int(d.len % chunk)
 	return nil
 }
@@ -230,15 +230,15 @@ func (d *Digest) CheckSum() [Size]byte {
 	var tmp [64]byte
 	tmp[0] = 0x80
 	if len%64 < 56 {
-		d.Write(tmp[0 : 56-len%64])
+		_, _ = d.Write(tmp[0 : 56-len%64])
 	} else {
-		d.Write(tmp[0 : 64+56-len%64])
+		_, _ = d.Write(tmp[0 : 64+56-len%64])
 	}
 
 	// Length in bits.
 	len <<= 3
 	binary.BigEndian.PutUint64(tmp[:], len)
-	d.Write(tmp[0:8])
+	_, _ = d.Write(tmp[0:8])
 
 	if d.nx != 0 {
 		panic("d.nx != 0")

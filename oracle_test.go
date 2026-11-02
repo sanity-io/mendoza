@@ -519,10 +519,6 @@ func (d *oracleDiffer) reconstructMap(idx int, reqs []oracleRequest) {
 	}
 }
 
-type oracleSliceRequestData struct {
-	candidates map[int]*oracleSliceCandidate
-}
-
 type oracleSliceAlias struct {
 	elementIdx     int
 	prevIsAdjacent bool

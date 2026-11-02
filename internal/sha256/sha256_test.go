@@ -12,11 +12,11 @@ func TestWriteStringMatchesWrite(t *testing.T) {
 			s := strings.Repeat("x", n)
 
 			a := New()
-			a.Write(make([]byte, prefix))
-			a.Write([]byte(s))
+			_, _ = a.Write(make([]byte, prefix))
+			_, _ = a.Write([]byte(s))
 
 			b := New()
-			b.Write(make([]byte, prefix))
+			_, _ = b.Write(make([]byte, prefix))
 			b.WriteString(s)
 
 			if a.CheckSum() != b.CheckSum() {

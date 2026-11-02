@@ -129,7 +129,7 @@ func BenchmarkCreateDoublePatch(b *testing.B) {
 func BenchmarkDifferCreatePatch(b *testing.B) {
 	benchPairs(b, func(b *testing.B, left, right interface{}) {
 		d := &Differ{}
-		d.CreatePatch(left, right) // grow the buffers
+		_, _ = d.CreatePatch(left, right) // grow the buffers
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			if _, err := d.CreatePatch(left, right); err != nil {
@@ -143,7 +143,7 @@ func BenchmarkDifferWriteTo(b *testing.B) {
 	benchPairs(b, func(b *testing.B, left, right interface{}) {
 		d := &Differ{}
 		w := &discardWriter{}
-		d.Diff(left, right) // grow the buffers
+		_ = d.Diff(left, right) // grow the buffers
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			if err := d.Diff(left, right); err != nil {
