@@ -30,54 +30,63 @@ func (hashIndex *HashIndex) Build(hashList *HashList) {
 	// Maps never shrink, but clearing a map that once held a large document stays cheap: with Go 1.24+ maps,
 	// clearing 100k of retained capacity measured ~0.35µs. Re-making the maps when they are oversized would
 	// allocate on every large/small alternation, so they are kept.
-	clear(hashIndex.children)
-	clear(hashIndex.xorData)
+	for key := range hashIndex.children {
+		delete(hashIndex.children, key)
+	}
+	for key := range hashIndex.xorData {
+		delete(hashIndex.xorData, key)
+	}
 	hashIndex.nodes = hashIndex.nodes[:0]
 
 	for idx := range hashList.Entries {
 		entry := &hashList.Entries[idx]
-		pushChain(hashIndex, hashIndex.children, childKey{parent: entry.Parent, hash: entry.Hash}, idx)
+		key := childKey{parent: entry.Parent, hash: entry.Hash}
+		current, ok := hashIndex.children[key]
+		hashIndex.children[key] = hashIndex.pushChain(current, ok, idx)
 
 		if !entry.XorHash.IsNull() {
 			for it := hashList.Iter(idx); !it.IsDone(); it.Next() {
 				xorHash := entry.XorHash
 				xorHash.Xor(it.GetEntry().Hash)
 
-				if current, ok := hashIndex.xorData[xorHash]; ok && hashIndex.nodes[current.tail].idx == idx {
+				current, ok := hashIndex.xorData[xorHash]
+				if ok && hashIndex.nodes[current.tail].idx == idx {
 					// Already present.
 					continue
 				}
 
-				pushChain(hashIndex, hashIndex.xorData, xorHash, idx)
+				hashIndex.xorData[xorHash] = hashIndex.pushChain(current, ok, idx)
 			}
 		}
 	}
 }
 
-func pushChain[K comparable](hashIndex *HashIndex, m map[K]chain, key K, idx int) {
+// pushChain appends idx to a chain, or starts a new one when the map lookup found no entry.
+func (hashIndex *HashIndex) pushChain(current chain, ok bool, idx int) chain {
 	n := len(hashIndex.nodes)
 	hashIndex.nodes = append(hashIndex.nodes, node{idx: idx, next: -1})
-	if current, ok := m[key]; ok {
+	if ok {
 		hashIndex.nodes[current.tail].next = n
 		current.tail = n
-		m[key] = current
-	} else {
-		m[key] = chain{head: n, tail: n}
+		return current
 	}
+	return chain{head: n, tail: n}
 }
 
 // LookupChild returns the children of the map or slice entry parent whose hash is key.
 func (hashIndex *HashIndex) LookupChild(parent int, key Hash) ChainIter {
-	return iterChain(hashIndex, hashIndex.children, childKey{parent: parent, hash: key})
+	current, ok := hashIndex.children[childKey{parent: parent, hash: key}]
+	return hashIndex.iterChain(current, ok)
 }
 
 // LookupXor returns the entries which have a field that, when removed, makes their XorHash equal to key.
 func (hashIndex *HashIndex) LookupXor(key Hash) ChainIter {
-	return iterChain(hashIndex, hashIndex.xorData, key)
+	current, ok := hashIndex.xorData[key]
+	return hashIndex.iterChain(current, ok)
 }
 
-func iterChain[K comparable](hashIndex *HashIndex, m map[K]chain, key K) ChainIter {
-	if current, ok := m[key]; ok {
+func (hashIndex *HashIndex) iterChain(current chain, ok bool) ChainIter {
+	if ok {
 		return ChainIter{nodes: hashIndex.nodes, cur: current.head}
 	}
 	return ChainIter{cur: -1}
