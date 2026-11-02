@@ -34,6 +34,21 @@ func TestHashesDistinguishTypes(t *testing.T) {
 	}
 }
 
+func TestValidateMatchesHashListFor(t *testing.T) {
+	invalid := []interface{}{
+		1,
+		struct{}{},
+		map[string]interface{}{"a": "x", "b": []interface{}{"y", int64(2)}},
+		[]interface{}{map[string]interface{}{"nested": map[string]string{}}},
+	}
+	for _, doc := range append(append([]interface{}{}, docs...), invalid...) {
+		_, want := HashListFor(doc, nil)
+		if got := Validate(doc); (got == nil) != (want == nil) || (got != nil && got.Error() != want.Error()) {
+			t.Errorf("Validate(%#v) = %v, want %v", doc, got, want)
+		}
+	}
+}
+
 func TestFillMatchesHashListFor(t *testing.T) {
 	// Fill the same list with each document in turn (and in reverse) to check that nothing leaks between them.
 	var reused HashList

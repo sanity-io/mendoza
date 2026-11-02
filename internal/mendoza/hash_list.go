@@ -95,6 +95,31 @@ func (entry *HashEntry) IsNonEmptySlice() bool {
 	return ok && len(val) > 0
 }
 
+// Validate returns the error AddDocument would return for doc without a convert function, without hashing it. When
+// doc has several unsupported values, the error may name a different one.
+func Validate(doc interface{}) error {
+	switch doc := doc.(type) {
+	case nil, bool, float64, string:
+		return nil
+	case map[string]interface{}:
+		for _, value := range doc {
+			if err := Validate(value); err != nil {
+				return err
+			}
+		}
+		return nil
+	case []interface{}:
+		for _, value := range doc {
+			if err := Validate(value); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported type: %T", doc)
+	}
+}
+
 func (hashList *HashList) AddDocument(obj interface{}) error {
 	_, _, err := hashList.process(-1, Reference{}, obj)
 	return err

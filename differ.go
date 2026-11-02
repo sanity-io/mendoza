@@ -115,6 +115,16 @@ func (d *Differ) Diff(left, right interface{}) error {
 		return nil
 	}
 
+	if right == nil && d.options.convertFunc == nil {
+		// Nothing on the left can be reused, so skip hashing it, but still reject what a full diff would reject.
+		// A convert function may change either side, so it takes the full path.
+		if err := mendoza.Validate(left); err != nil {
+			return err
+		}
+		d.patch = d.differ.valueSpan(nil)
+		return nil
+	}
+
 	if changed, err := d.fill(left, right); !changed {
 		return err
 	}

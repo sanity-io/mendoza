@@ -305,6 +305,7 @@ func BenchmarkNilPatch(b *testing.B) {
 		{"empty", nil, nil},
 		{"insert", nil, "insert"},
 		{"delete", "delete", nil},
+		{"delete/1000", makeDoc(1000, false), nil},
 	} {
 		b.Run(test.name, func(b *testing.B) {
 			b.Run("CreatePatch", func(b *testing.B) {

@@ -217,6 +217,31 @@ func TestConvertFunc(t *testing.T) {
 	}
 	requireSamePatch(t, "Differ.CreatePatch", got, want, left, right)
 
+	// A nil right side takes the full path with a convert function, which may convert nil or the left side.
+	for _, test := range []struct {
+		name    string
+		convert func(value interface{}) interface{}
+	}{
+		{"wrapped", options.convertFunc},
+		{"nil to value", func(value interface{}) interface{} {
+			if value == nil {
+				return "converted"
+			}
+			return options.convertFunc(value)
+		}},
+	} {
+		nilOptions := DefaultOptions.WithConvertFunc(test.convert)
+		want, err := oracleCreatePatch(&nilOptions, left, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := nilOptions.NewDiffer().CreatePatch(left, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireSamePatch(t, "Differ.CreatePatch with a nil right side, "+test.name, got, want, left, nil)
+	}
+
 	if _, err := CreatePatch(left, right); err == nil {
 		t.Fatal("expected an error for an unsupported type without the convert function")
 	}
@@ -360,6 +385,13 @@ func TestDifferErrors(t *testing.T) {
 	}
 	if err := d.Diff(valid, invalid); err == nil {
 		t.Error("expected an error for an unsupported type on the right")
+	}
+	// Diffing against nil skips hashing, but must still reject the left document.
+	if err := d.Diff(invalid, nil); err == nil {
+		t.Error("expected an error for an unsupported type on the left when the right is nil")
+	}
+	if _, err := CreatePatch(invalid, nil); err == nil {
+		t.Error("expected an error from CreatePatch when the right is nil")
 	}
 	if err := d.DiffDouble(valid, invalid); err == nil {
 		t.Error("expected an error from DiffDouble")
