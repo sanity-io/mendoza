@@ -9,7 +9,6 @@ import (
 
 type jsonWriter struct {
 	result []byte
-	err    error
 }
 
 func (w *jsonWriter) WriteUint8(v uint8) error {
@@ -111,7 +110,7 @@ func (r *jsonReader) expectArray() error {
 
 type jsonValueReader struct {
 	data []interface{}
-	idx int
+	idx  int
 }
 
 func (r *jsonValueReader) ReadUint8() (uint8, error) {

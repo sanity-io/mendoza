@@ -142,6 +142,7 @@ func TestRoundtrip(t *testing.T) {
 			err = json.Unmarshal(json1, &parsedPatch1)
 			require.NoError(t, err)
 			err = decodePatch(json1, &decodedPatch1)
+			require.NoError(t, err)
 			require.EqualValues(t, patch1, parsedPatch1)
 			require.EqualValues(t, parsedPatch1, decodedPatch1)
 
