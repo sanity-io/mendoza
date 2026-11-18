@@ -10,7 +10,7 @@ import (
 func TestEncodingSize(t *testing.T) {
 	patch := mendoza.Patch{
 		&mendoza.OpBlank{},
-		&mendoza.OpArrayAppendSlice{0, 6},
+		&mendoza.OpArrayAppendSlice{Left: 0, Right: 6},
 	}
 
 	b, err := mendozamsgpack.Marshal(patch)
@@ -22,10 +22,10 @@ func TestRoundtrip(t *testing.T) {
 	// This patch isn't valid, we're only testing that it roundtrips properly
 	patch := mendoza.Patch{
 		&mendoza.OpBlank{},
-		&mendoza.OpPushFieldCopy{OpPushField: mendoza.OpPushField{10}},
-		&mendoza.OpPushElement{1000000},
-		&mendoza.OpValue{"abc"},
-		&mendoza.OpArrayAppendSlice{0, 6},
+		&mendoza.OpPushFieldCopy{OpPushField: mendoza.OpPushField{Index: 10}},
+		&mendoza.OpPushElement{Index: 1000000},
+		&mendoza.OpValue{Value: "abc"},
+		&mendoza.OpArrayAppendSlice{Left: 0, Right: 6},
 	}
 
 	b, err := mendozamsgpack.Marshal(patch)
@@ -40,13 +40,13 @@ func TestRoundtrip(t *testing.T) {
 func TestSize(t *testing.T) {
 	left := map[string]interface{}{
 		"_type": "Person",
-		"name": "Bob",
-		"age": 10.0,
+		"name":  "Bob",
+		"age":   10.0,
 	}
 	right := map[string]interface{}{
 		"_type": "Person",
-		"name": "Bob",
-		"age": 15.0,
+		"name":  "Bob",
+		"age":   15.0,
 	}
 
 	patch, err := mendoza.CreatePatch(left, right)

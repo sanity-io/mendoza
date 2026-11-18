@@ -1,15 +1,39 @@
 package mendoza
 
 import (
-	"github.com/sanity-io/mendoza/internal/mendoza"
 	"unicode/utf8"
+
+	"github.com/sanity-io/mendoza/internal/mendoza"
 )
 
-type differ struct {
-	left      *mendoza.HashList
-	right     *mendoza.HashList
-	hashIndex *mendoza.HashIndex
-	options   *Options
+// Differ creates patches while reusing its working memory between calls. Use Diff and WriteTo to write a patch
+// without building a Patch, or CreatePatch to get one.
+//
+// The zero value is ready to use and uses the default options; Options.NewDiffer creates one with other options.
+// A Differ must not be copied after first use and is not safe for concurrent use. It keeps references to its last
+// documents until the next diff, and keeps its buffers' capacity for reuse. Inputs must not be mutated between
+// diffing and writing the result.
+//
+// On Go 1.24+ with the default runtime, warmed-up diffs can run without allocating. Older Go map implementations
+// may still allocate when rebuilding the index, and writers and conversion functions may allocate independently.
+type Differ struct {
+	noCopy              noCopy
+	options             Options
+	left, right         mendoza.HashList
+	hashIndex           mendoza.HashIndex
+	differ              differ
+	patch, reversePatch span
+}
+
+// noCopy makes go vet's copylocks check report copies of a Differ. A copy would share the original's buffers.
+type noCopy struct{}
+
+func (*noCopy) Lock()   {}
+func (*noCopy) Unlock() {}
+
+// NewDiffer creates a Differ which uses the given options. A zero Differ uses the default options.
+func (options Options) NewDiffer() *Differ {
+	return &Differ{options: options}
 }
 
 // Creates a patch which can be applied to the left document to produce the right document.
@@ -28,79 +52,155 @@ func CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
 }
 
 // Creates a patch which can be applied to the left document to produce the right document.
+//
+// Use a Differ instead to reuse memory between calls.
 func (options *Options) CreatePatch(left, right interface{}) (Patch, error) {
+	// This intentionally creates a new Differ per call rather than pooling them: a pooled Differ would retain the
+	// buffers of the largest document it has seen. Callers who want reuse can hold a Differ themselves.
+
+	// No working memory is needed when there is no source document.
 	if left == nil {
 		if right == nil {
 			return Patch{}, nil
 		}
-		return Patch{&OpValue{right}}, nil
+		return Patch{&OpValue{Value: right}}, nil
 	}
-
-	leftList, err := mendoza.HashListFor(left, options.convertFunc)
-	if err != nil {
-		return nil, err
-	}
-	rightList, err := mendoza.HashListFor(right, options.convertFunc)
-	if err != nil {
-		return nil, err
-	}
-
-	hashIndex := mendoza.NewHashIndex(leftList)
-	differ := differ{
-		left:      leftList,
-		right:     rightList,
-		hashIndex: hashIndex,
-	}
-	return differ.build(), nil
+	return options.NewDiffer().CreatePatch(left, right)
 }
 
 // Creates two patches: The first can be applied to the left document to produce the right document,
 // the second can be applied to the right document to produce the left document.
+//
+// Use a Differ instead to reuse memory between calls.
 func (options *Options) CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
+	// Preserve the literal-only fast paths without allocating a Differ or tape.
 	if left == nil && right == nil {
 		return Patch{}, Patch{}, nil
 	}
+	if left == nil || right == nil {
+		return Patch{&OpValue{Value: right}}, Patch{&OpValue{Value: left}}, nil
+	}
+	return options.NewDiffer().CreateDoublePatch(left, right)
+}
+
+// CreatePatch is like Options.CreatePatch, but reuses the Differ's working memory. The returned Patch and its
+// operations are allocated separately and remain valid across calls. Values in it are not deep-copied.
+func (d *Differ) CreatePatch(left, right interface{}) (Patch, error) {
+	if err := d.Diff(left, right); err != nil {
+		return nil, err
+	}
+	return d.differ.patchFor(d.patch), nil
+}
+
+// CreateDoublePatch is like Options.CreateDoublePatch, but reuses the Differ's working memory. The returned
+// patches and their operations are allocated separately and remain valid across calls. Values in them are not
+// deep-copied.
+func (d *Differ) CreateDoublePatch(left, right interface{}) (Patch, Patch, error) {
+	if err := d.DiffDouble(left, right); err != nil {
+		return nil, nil, err
+	}
+	return d.differ.patchFor(d.patch), d.differ.patchFor(d.reversePatch), nil
+}
+
+// Diff computes a patch which can be applied to the left document to produce the right document. Use WriteTo to
+// write it out without allocating a Patch. The result is valid until the next diff (including CreatePatch or
+// CreateDoublePatch). Each diff discards the previous forward and reverse results, even if it returns an error.
+func (d *Differ) Diff(left, right interface{}) error {
+	d.reset()
 
 	if left == nil {
-		return Patch{&OpValue{right}}, Patch{&OpValue{nil}}, nil
+		if right != nil {
+			d.patch = d.differ.valueSpan(right)
+		}
+		return nil
 	}
 
-	if right == nil {
-		return Patch{&OpValue{nil}}, Patch{&OpValue{left}}, nil
+	if right == nil && d.options.convertFunc == nil {
+		// Nothing on the left can be reused, so skip hashing it, but still reject what a full diff would reject.
+		// A convert function may change either side, so it takes the full path.
+		if err := mendoza.Validate(left); err != nil {
+			return err
+		}
+		d.patch = d.differ.valueSpan(nil)
+		return nil
 	}
 
-	leftList, err := mendoza.HashListFor(left, options.convertFunc)
-	if err != nil {
-		return nil, nil, err
-	}
-	rightList, err := mendoza.HashListFor(right, options.convertFunc)
-	if err != nil {
-		return nil, nil, err
+	if changed, err := d.fill(left, right); !changed {
+		return err
 	}
 
-	leftHashIndex := mendoza.NewHashIndex(leftList)
-	leftDiffer := differ{
-		left:      leftList,
-		right:     rightList,
-		hashIndex: leftHashIndex,
-		options:   options,
+	d.patch = d.build(&d.left, &d.right)
+	return nil
+}
+
+// DiffDouble computes two patches: The first can be applied to the left document to produce the right document,
+// the second can be applied to the right document to produce the left document. Use WriteTo and WriteReverseTo to
+// write them out without allocating Patches. The results have the same lifetime as the result of Diff.
+func (d *Differ) DiffDouble(left, right interface{}) error {
+	d.reset()
+
+	if left == nil && right == nil {
+		return nil
 	}
 
-	rightHashIndex := mendoza.NewHashIndex(rightList)
-	rightDiffer := differ{
-		left:      rightList,
-		right:     leftList,
-		hashIndex: rightHashIndex,
-		options:   options,
+	if left == nil || right == nil {
+		d.patch = d.differ.valueSpan(right)
+		d.reversePatch = d.differ.valueSpan(left)
+		return nil
 	}
-	return leftDiffer.build(), rightDiffer.build(), nil
+
+	if changed, err := d.fill(left, right); !changed {
+		return err
+	}
+
+	d.patch = d.build(&d.left, &d.right)
+	d.reversePatch = d.build(&d.right, &d.left)
+	return nil
+}
+
+// WriteTo writes the forward patch from the last Diff or DiffDouble, in the same format as Patch.WriteTo. It can
+// be called repeatedly, including after a writer error. Before a diff or after a failed diff, it writes nothing.
+func (d *Differ) WriteTo(w Writer) error {
+	return d.differ.writeSpan(w, d.patch)
+}
+
+// WriteReverseTo writes the reverse patch from the last DiffDouble, in the same format as Patch.WriteTo. It can be
+// called repeatedly, including after a writer error. Before DiffDouble, after a forward-only diff, or after a
+// failed diff, it writes nothing.
+func (d *Differ) WriteReverseTo(w Writer) error {
+	return d.differ.writeSpan(w, d.reversePatch)
+}
+
+// fill hashes both documents and reports whether they differ.
+func (d *Differ) fill(left, right interface{}) (changed bool, err error) {
+	if err := d.left.Fill(left, d.options.convertFunc); err != nil {
+		return false, err
+	}
+	if err := d.right.Fill(right, d.options.convertFunc); err != nil {
+		return false, err
+	}
+	return d.left.Entries[0].Hash != d.right.Entries[0].Hash, nil
+}
+
+// build indexes left and records a patch which turns it into right.
+func (d *Differ) build(left, right *mendoza.HashList) span {
+	d.hashIndex.Build(left)
+	return d.differ.build(left, right, &d.hashIndex)
+}
+
+func (d *Differ) reset() {
+	d.left.Reset()
+	d.right.Reset()
+	d.differ.reset()
+	d.patch = span{}
+	d.reversePatch = span{}
 }
 
 /*
 
 The main function in the differ is `reconstruct` which takes two parameters.
 The first is the target value: a reference to a value in the right-hand side.
-The second parameter is a slice of _requests_. A request has an _initial
+The second parameter identifies a range of _requests_ in d.reqs. A request has an _initial
 context_ which is a reference to a value in the left-hand side. The goal of
 `reconstruct` is then, for each request, build a patch which converts the
 _initial context_ into the target value.  Every request also keeps track of the
@@ -108,74 +208,188 @@ _best size_.
 
 For arrays/objects this is done in a few steps:
 
-1. First we look at the target (ignoring any context) and find other values that are good candidates.
-   This is a cheap check which uses the global hash index and only looks for objects/arrays that
-   shares some fields/elements with the target. This can only check for exact equality.
+1. Collect candidates for each request. We try its primary value and, for objects, other direct children
+   of its context found through the xor index. Candidate discovery is a heuristic; patch costs are not
+   known until reconstruction finishes.
 
-2. Then we do filtering of candidates based on the requests' context:
-   - Currently we only care about candidates that are direct children of the context.
-   - Per request we pick the N best candidates to explore. This is just an heuristic because we only know
-     "how many fields/elements they have in common" and nothing about the size of representing the patch of
-     the differences.
+2. Find exact aliases: fields/elements in each candidate whose value hashes match those in the target.
 
 3. For each field/element in the target we can then build a list of requests (based on the candidates)
    and recurse into `reconstruct`. The more candidates we have in the previous step, the more requests
    we'll have in this step, and the time complexity will be higher.
 
-4. At this point we know have full information about each candidate: All patches are calculated.
+4. At this point we have full information about each candidate: All patches are calculated.
    We then just need to connect each candidate with a request and we're done!
+
+Memory: Requests, candidates and aliases are appended to reusable slices owned by the differ (arenas).
+The slices grow as needed, and each reconstruction call truncates its scratch data before returning.
+Use indices across recursive calls: appends can reallocate the arenas, leaving pointers into old backing
+arrays stale. Left/right HashList entries are stable during reconstruction.
+
+Patches are recorded as ops on a tape. Rejected candidates' newly emitted records are discarded, while selected
+patches survive recursive calls so a parent can include a child's patch by span (codeInclude) instead of copying
+it. Patch sizes are heuristic costs, not operation counts or exact serialized byte lengths.
 
 */
 
-func (d *differ) build() Patch {
-	root := d.right.Entries[0]
+// span refers to the range [start, end) in one of the differ's slices.
+type span struct {
+	start, end int
+}
 
-	if d.left.Entries[0].Hash == root.Hash {
-		// Exact same value
-		return Patch{}
-	}
+type differ struct {
+	left      *mendoza.HashList
+	right     *mendoza.HashList
+	hashIndex *mendoza.HashIndex
 
-	reqs := []request{
-		{
-			contextIdx: -1,
-			primaryIdx: 0,
-			size:       root.Size + 1,
-		},
-	}
+	tape []opRec
 
-	d.reconstruct(0, reqs)
+	reqs []request
+	// requestOffsets records where each field/element's requests start in reqs; see requestsForField.
+	requestOffsets []int
 
-	req := reqs[0]
+	candidates   []candidate
+	mapAliases   []mapAlias
+	sliceAliases []sliceAlias
+}
 
-	if req.patch == nil {
-		return Patch{&OpValue{root.Value}}
+// scratchMark records the lengths of the scratch arenas, so a reconstruction can remove what it appended.
+type scratchMark struct {
+	reqs, requestOffsets, candidates, mapAliases, sliceAliases int
+}
+
+func (d *differ) mark() scratchMark {
+	return scratchMark{len(d.reqs), len(d.requestOffsets), len(d.candidates), len(d.mapAliases), len(d.sliceAliases)}
+}
+
+// restore truncates the scratch arenas to m. The tape is not restored: parents still need the patches on it.
+func (d *differ) restore(m scratchMark) {
+	d.reqs = d.reqs[:m.reqs]
+	d.requestOffsets = d.requestOffsets[:m.requestOffsets]
+	d.candidates = d.candidates[:m.candidates]
+	d.mapAliases = d.mapAliases[:m.mapAliases]
+	d.sliceAliases = d.sliceAliases[:m.sliceAliases]
+}
+
+func (d *differ) reset() {
+	d.truncateTape(0)
+	d.restore(scratchMark{})
+}
+
+func (d *differ) build(left, right *mendoza.HashList, hashIndex *mendoza.HashIndex) span {
+	d.left = left
+	d.right = right
+	d.hashIndex = hashIndex
+
+	root := &d.right.Entries[0]
+
+	d.reqs = append(d.reqs[:0], request{
+		contextIdx: -1,
+		primaryIdx: 0,
+		size:       root.Size + 1,
+	})
+
+	tapeStart := len(d.tape)
+	d.reconstruct(0, span{0, 1})
+
+	req := d.reqs[0]
+	d.reqs = d.reqs[:0]
+
+	if !req.hasPatch {
+		// No reconstructed child is reachable when the whole document is replaced.
+		// Keep any earlier build's tape (the forward patch in DiffDouble).
+		d.truncateTape(tapeStart)
+		return d.valueSpan(root.Value)
 	}
 
 	return req.patch
 }
 
+// Requests contain only indices, not document references, so their arena can be reused without clearing it.
 type request struct {
+	// Both indices refer to the left document. contextIdx is -1 for the root request.
 	contextIdx int
 	primaryIdx int
 	size       int
-	patch      Patch
-	outputKey  string
+	patch      span
+	hasPatch   bool
+	// patchSourceIdx is the left-document entry used by the chosen patch, whose key is needed on return.
+	patchSourceIdx int
 }
 
-func (req *request) update(patch Patch, size int, outputKey string) {
-	if size < req.size {
-		req.patch = patch
-		req.size = size
-		req.outputKey = outputKey
+// updateRequest keeps the newly recorded patch only if it improves the request's cost.
+// The patch must be at the end of the tape: rejected records have no users and can be discarded,
+// while earlier child spans and previously selected patches must remain valid.
+func (d *differ) updateRequest(reqIdx int, patch span, size int, patchSourceIdx int) {
+	req := &d.reqs[reqIdx]
+	if size >= req.size {
+		d.truncateTape(patch.start)
+		return
+	}
+	req.patch = patch
+	req.hasPatch = true
+	req.size = size
+	req.patchSourceIdx = patchSourceIdx
+}
+
+// requestsForField returns the request range for a field or element. offset is the start of this container's
+// entries in requestOffsets. Each container records one offset per field/element, plus a final end offset.
+func (d *differ) requestsForField(offset int, field int) span {
+	return span{d.requestOffsets[offset+field], d.requestOffsets[offset+field+1]}
+}
+
+// childPatch returns the first request in reqs for contextIdx if it has a patch, and nil otherwise. A later request
+// with the same context must not override the first one. The pointer is only valid until the next append to d.reqs.
+func (d *differ) childPatch(reqs span, contextIdx int) *request {
+	for i := reqs.start; i < reqs.end; i++ {
+		if d.reqs[i].contextIdx != contextIdx {
+			continue
+		}
+		if req := &d.reqs[i]; req.hasPatch {
+			return req
+		}
+		return nil
+	}
+	return nil
+}
+
+// reconstructChildren reconstructs each child of the target idx for the requests built for it at offset.
+func (d *differ) reconstructChildren(idx int, offset int) {
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		d.reconstruct(it.GetIndex(), d.requestsForField(offset, it.GetEntry().Reference.Index))
 	}
 }
 
-func (d *differ) reconstruct(idx int, reqs []request) {
-	if len(reqs) == 0 {
+// findAliases records, for each candidate, which of its children equal a child of the target idx.
+//
+// Aliases are inserted target child by target child, and for each one in ascending order of the candidate's
+// matching children: insertSliceAlias depends on the previous target slot being final, and both insert functions
+// break ties by visiting order. Candidates have separate alias slots, so their order doesn't matter.
+func (d *differ) findAliases(idx int, candidates span) {
+	isMap := d.right.Entries[idx].IsNonEmptyMap()
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		entry := it.GetEntry()
+		for c := candidates.start; c < candidates.end; c++ {
+			cand := &d.candidates[c]
+			others := d.hashIndex.LookupChild(cand.contextIdx, entry.Hash)
+			for otherIdx, ok := others.Next(); ok; otherIdx, ok = others.Next() {
+				other := &d.left.Entries[otherIdx]
+				if isMap {
+					d.insertMapAlias(cand, entry.Reference, other.Reference)
+				} else {
+					d.insertSliceAlias(cand, entry.Reference, other.Reference)
+				}
+			}
+		}
+	}
+}
+
+func (d *differ) reconstruct(idx int, reqs span) {
+	if reqs.start == reqs.end {
 		return
 	}
 
-	entry := d.right.Entries[idx]
+	entry := &d.right.Entries[idx]
 
 	if entry.IsNonEmptyMap() {
 		d.reconstructMap(idx, reqs)
@@ -188,49 +402,41 @@ func (d *differ) reconstruct(idx int, reqs []request) {
 	}
 
 	if rightString, ok := entry.Value.(string); ok {
-		d.reconstructString(idx, rightString, reqs)
+		d.reconstructString(rightString, reqs)
 		return
 	}
 }
 
-func (d *differ) enterBlank(patch *Patch, idx int) {
+func (d *differ) enterBlank(idx int) {
 	if idx == 0 {
-		*patch = append(*patch, &OpBlank{})
+		d.emit(opRec{code: codeBlank})
 		return
 	}
 
-	entry := d.left.Entries[idx]
-	parentEntry := d.left.Entries[entry.Parent]
-
-	var op Op
+	entry := &d.left.Entries[idx]
+	parentEntry := &d.left.Entries[entry.Parent]
 
 	if parentEntry.IsNonEmptyMap() {
-		op = &OpPushFieldBlank{OpPushField: OpPushField{entry.Reference.Index}}
+		d.emit(opRec{code: codePushFieldBlank, a: entry.Reference.Index})
 	} else {
-		op = &OpPushElementBlank{OpPushElement: OpPushElement{entry.Reference.Index}}
+		d.emit(opRec{code: codePushElementBlank, a: entry.Reference.Index})
 	}
-
-	*patch = append(*patch, op)
 }
 
-func (d *differ) enterCopy(patch *Patch, idx int) {
+func (d *differ) enterCopy(idx int) {
 	if idx == 0 {
 		// Root => Already on the stack.
 		return
 	}
 
-	entry := d.left.Entries[idx]
-	parentEntry := d.left.Entries[entry.Parent]
-
-	var op Op
+	entry := &d.left.Entries[idx]
+	parentEntry := &d.left.Entries[entry.Parent]
 
 	if parentEntry.IsNonEmptyMap() {
-		op = &OpPushFieldCopy{OpPushField: OpPushField{entry.Reference.Index}}
+		d.emit(opRec{code: codePushFieldCopy, a: entry.Reference.Index})
 	} else {
-		op = &OpPushElementCopy{OpPushElement: OpPushElement{entry.Reference.Index}}
+		d.emit(opRec{code: codePushElementCopy, a: entry.Reference.Index})
 	}
-
-	*patch = append(*patch, op)
 }
 
 /*
@@ -239,7 +445,7 @@ Some notes about how we're building up calls from candidates:
 
 An object has multiple fields: {"a": "…", "b": …, "c": …}, and we find candidates of objects that are similar.
 
-Imagine that we found three candidates:
+Imagine that we found four candidates:
   - cand1 has {"a": "…", "b": …, "c": "different"}
   - cand2 has {"a": "…", "b": "different", "c": …}
   - cand3 has {"a": "…", "b": "different", "c": "different"}
@@ -255,40 +461,62 @@ In this case the 2 recursive calls are as follows:
 
 */
 
-// This stores information about each candidate map in the left-side document.
-type mapCandidate struct {
-	alias      map[string]mapAlias
-	seenKeys   map[string]struct{}
-	requestIdx int
-	contextIdx int
+// This stores information about each candidate map/slice in the left-side document.
+type candidate struct {
+	contextIdx int // Candidate container in the left document.
+	requestIdx int // Request in d.reqs that this candidate is trying to satisfy.
+	// aliasOffset starts this candidate's range in mapAliases or sliceAliases, one slot per target field/element.
+	aliasOffset int
+	// aliasCount is the number of map alias slots which are set (maps only).
+	aliasCount int
+	// contextIter walks the candidate's fields/elements while the requests are built.
+	contextIter mendoza.Iter
+}
+
+func (d *differ) addCandidate(contextIdx int, requestIdx int, aliasOffset int) {
+	d.candidates = append(d.candidates, candidate{
+		contextIdx:  contextIdx,
+		requestIdx:  requestIdx,
+		aliasOffset: aliasOffset,
+		contextIter: d.left.Iter(contextIdx),
+	})
 }
 
 type mapAlias struct {
+	ok       bool
 	fieldIdx int
 	sameKey  bool
 }
 
-func (mc *mapCandidate) init(contextIdx int, requestIdx int) {
-	mc.alias = make(map[string]mapAlias)
-	mc.seenKeys = make(map[string]struct{})
-	mc.requestIdx = requestIdx
-	mc.contextIdx = contextIdx
+func (d *differ) addMapCandidate(contextIdx int, requestIdx int, fieldCount int) {
+	d.addCandidate(contextIdx, requestIdx, len(d.mapAliases))
+	for i := 0; i < fieldCount; i++ {
+		d.mapAliases = append(d.mapAliases, mapAlias{})
+	}
 }
 
-func (mc *mapCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
-	current, currentOk := mc.alias[target.Key]
+func (d *differ) mapAlias(cand *candidate, target mendoza.Reference) *mapAlias {
+	return &d.mapAliases[cand.aliasOffset+target.Index]
+}
 
-	mc.seenKeys[target.Key] = struct{}{}
+func (d *differ) insertMapAlias(cand *candidate, target mendoza.Reference, source mendoza.Reference) {
+	current := d.mapAlias(cand, target)
+
+	// Every path below sets an unset slot.
+	if !current.ok {
+		cand.aliasCount++
+	}
 
 	if target.Key == source.Key {
-		mc.alias[target.Key] = mapAlias{
+		*current = mapAlias{
+			ok:       true,
 			fieldIdx: source.Index,
 			sameKey:  true,
 		}
 		return
 	}
 
-	if currentOk {
+	if current.ok {
 		if current.sameKey {
 			// Prefer sameKey
 			return
@@ -300,25 +528,34 @@ func (mc *mapCandidate) insertAlias(target mendoza.Reference, source mendoza.Ref
 		}
 	}
 
-	mc.alias[target.Key] = mapAlias{
+	*current = mapAlias{
+		ok:       true,
 		fieldIdx: source.Index,
 		sameKey:  false,
 	}
 }
 
-func (mc *mapCandidate) IsMissing(reference mendoza.Reference) bool {
-	_, ok := mc.alias[reference.Key]
-	return !ok
+// removedFields counts the fields in the left map leftIdx which don't exist in the right map rightIdx. If emit is
+// set, it also emits an op deleting each of them (in key order).
+func (d *differ) removedFields(leftIdx int, rightIdx int, emit bool) int {
+	count := 0
+	rightIter := d.right.Iter(rightIdx)
+	for leftIter := d.left.Iter(leftIdx); !leftIter.IsDone(); leftIter.Next() {
+		key := leftIter.GetKey()
+		for !rightIter.IsDone() && rightIter.GetKey() < key {
+			rightIter.Next()
+		}
+		if rightIter.IsDone() || rightIter.GetKey() != key {
+			count++
+			if emit {
+				d.emit(opRec{code: codeObjectDeleteField, a: leftIter.GetEntry().Reference.Index})
+			}
+		}
+	}
+	return count
 }
 
-func (mc *mapCandidate) RegisterRequest(childIdx int, childRef mendoza.Reference, reqIdx int) {
-	mc.seenKeys[childRef.Key] = struct{}{}
-}
-
-func (d *differ) reconstructMap(idx int, reqs []request) {
-	// right-index -> list of requests
-	fieldRequests := [][]request{}
-
+func (d *differ) reconstructMap(idx int, reqs span) {
 	// The input here is a list of requests. Each requests has _context_ and _primary_ which looks like this:
 	//
 	//   Left           Right
@@ -334,388 +571,304 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 	//
 	// Note that context can either be an array or an object.
 
-	// Currently we're only looking at primary.
+	// Everything appended to the scratch arenas is removed again before returning.
+	mark := d.mark()
 
-	candidates := make([]mapCandidate, 0, len(reqs))
-
-	for i, req := range reqs {
-		if !d.left.Entries[req.primaryIdx].IsNonEmptyMap() {
-			continue
-		}
-
-		cand := mapCandidate{}
-		cand.init(req.primaryIdx, i)
-		candidates = append(candidates, cand)
+	candidates := d.findMapCandidates(idx, reqs)
+	d.findAliases(idx, candidates)
+	offset := d.buildMapRequests(idx, candidates)
+	d.reconstructChildren(idx, offset)
+	for c := candidates.start; c < candidates.end; c++ {
+		d.assembleMapPatch(idx, &d.candidates[c], offset)
 	}
 
-	entry := d.right.Entries[idx]
-
-	// Use the xor-index to find fields that differ a bit
-	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		fieldEntry := it.GetEntry()
-
-		xorHash := entry.XorHash
-		xorHash.Xor(fieldEntry.Hash)
-
-		for _, otherIdx := range d.hashIndex.XorData[xorHash] {
-			otherEntry := d.left.Entries[otherIdx]
-
-			for i, req := range reqs {
-				if otherEntry.Parent == req.contextIdx && otherIdx != req.primaryIdx {
-					cand := mapCandidate{}
-					cand.init(otherIdx, i)
-					candidates = append(candidates, cand)
-				}
-			}
-		}
-	}
-
-	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		fieldEntry := it.GetEntry()
-		fieldRequests = append(fieldRequests, nil)
-
-		for _, otherIdx := range d.hashIndex.Data[fieldEntry.Hash] {
-			otherEntry := d.left.Entries[otherIdx]
-
-			for candIdx := range candidates {
-				cand := &candidates[candIdx]
-				if cand.contextIdx == otherEntry.Parent {
-					cand.insertAlias(fieldEntry.Reference, otherEntry.Reference, fieldEntry.Size)
-				}
-			}
-		}
-	}
-
-	// Now build the requests
-	for _, cand := range candidates {
-		contextIter := d.left.Iter(cand.contextIdx)
-
-		i := 0
-		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-			fieldEntry := it.GetEntry()
-			fieldKey := fieldEntry.Reference.Key
-
-			cand.seenKeys[fieldKey] = struct{}{}
-
-			if _, ok := cand.alias[fieldKey]; !ok {
-				for !contextIter.IsDone() {
-					key := contextIter.GetKey()
-
-					if key > fieldKey {
-						break
-					}
-
-					if key == fieldKey {
-						fieldReqs := fieldRequests[i]
-						fieldReqs = append(fieldReqs, request{
-							contextIdx: cand.contextIdx,
-							primaryIdx: contextIter.GetIndex(),
-							size:       fieldEntry.Size + 1,
-						})
-						fieldRequests[i] = fieldReqs
-						break
-					}
-
-					contextIter.Next()
-				}
-			}
-			i++
-		}
-	}
-
-	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		d.reconstruct(it.GetIndex(), fieldRequests[it.GetEntry().Reference.Index])
-	}
-
-	for _, cand := range candidates {
-		primaryIdx := cand.contextIdx
-
-		size := 0
-		patch := Patch{}
-
-		removeKeys := map[string]int{}
-
-		for it := d.left.Iter(primaryIdx); !it.IsDone(); it.Next() {
-			ref := it.GetEntry().Reference
-			if _, ok := cand.seenKeys[ref.Key]; ok {
-				// do nothing
-			} else {
-				removeKeys[ref.Key] = ref.Index
-			}
-		}
-
-		removeCount := len(removeKeys)
-		aliasCount := len(cand.alias)
-
-		isCopy := false
-
-		if removeCount < aliasCount {
-			// Note: This doesn't currently take into account that we have two types of aliasing.
-			// It's shorter to alias a field with the same key (one single copy field).
-			// For now let's assume that the difference here is pretty small either way.
-			isCopy = true
-		}
-
-		if isCopy {
-			d.enterCopy(&patch, primaryIdx)
-		} else {
-			d.enterBlank(&patch, primaryIdx)
-		}
-
-		size += 2
-
-		if isCopy {
-			// Delete fields we don't need
-			for _, removeIdx := range removeKeys {
-				patch = append(patch, &OpObjectDeleteField{removeIdx})
-				size += 2
-			}
-		}
-
-		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-			fieldEntry := it.GetEntry()
-			fieldKey := fieldEntry.Reference.Key
-
-			if alias, ok := cand.alias[fieldKey]; ok {
-				if alias.sameKey {
-					if !isCopy {
-						// We only need this if we're starting with a blank object
-						patch = append(patch, &OpObjectCopyField{OpPushField: OpPushField{alias.fieldIdx}})
-						size += 2
-					}
-				} else {
-					patch = append(patch,
-						&OpPushFieldCopy{OpPushField: OpPushField{alias.fieldIdx}},
-						&OpReturnIntoObjectPop{OpReturnIntoObject: OpReturnIntoObject{fieldKey}},
-					)
-					size += 2 + 1 + len(fieldKey)
-				}
-			} else {
-				didPatch := false
-
-				// Not an alias. Look up the real diff.
-				for _, fieldReq := range fieldRequests[fieldEntry.Reference.Index] {
-					if fieldReq.contextIdx == cand.contextIdx {
-						// Match it up with the correct context
-						if fieldReq.patch != nil {
-							patch = append(patch, fieldReq.patch...)
-							size += fieldReq.size
-
-							if fieldReq.outputKey == fieldKey {
-								patch = append(patch, &OpReturnIntoObjectSameKeyPop{})
-								size += 1
-							} else {
-								patch = append(patch, &OpReturnIntoObjectPop{OpReturnIntoObject: OpReturnIntoObject{fieldKey}})
-								size += 1 + len(fieldKey)
-							}
-							didPatch = true
-						}
-
-						break
-					}
-				}
-
-				if !didPatch {
-					patch = append(patch, &OpObjectSetFieldValue{
-						OpValue{fieldEntry.Value},
-						OpReturnIntoObject{fieldKey},
-					})
-					size += 1 + len(fieldKey) + fieldEntry.Size
-				}
-			}
-		}
-
-		req := &reqs[cand.requestIdx]
-		req.update(patch, size, d.left.Entries[primaryIdx].Reference.Key)
-	}
+	d.restore(mark)
 }
 
-type sliceRequestData struct {
-	candidates map[int]*sliceCandidate
+// findMapCandidates adds a candidate for each request whose primary value is a map, and for each sibling of the
+// primary value that matches the target idx after removing one field's value hash (found through the xor index).
+func (d *differ) findMapCandidates(idx int, reqs span) span {
+	entry := &d.right.Entries[idx]
+	fieldCount := len(entry.Value.(map[string]interface{}))
+	start := len(d.candidates)
+
+	for i := reqs.start; i < reqs.end; i++ {
+		if primaryIdx := d.reqs[i].primaryIdx; d.left.Entries[primaryIdx].IsNonEmptyMap() {
+			d.addMapCandidate(primaryIdx, i, fieldCount)
+		}
+	}
+
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		xorHash := entry.XorHash
+		xorHash.Xor(it.GetEntry().Hash)
+
+		// Each request has its own candidate list, so looking up per request keeps every request's candidates in
+		// ascending order, as a single document-wide lookup would.
+		for i := reqs.start; i < reqs.end; i++ {
+			req := &d.reqs[i]
+			others := d.hashIndex.LookupXor(req.contextIdx, xorHash)
+			for otherIdx, ok := others.Next(); ok; otherIdx, ok = others.Next() {
+				if otherIdx != req.primaryIdx {
+					d.addMapCandidate(otherIdx, i, fieldCount)
+				}
+			}
+		}
+	}
+
+	return span{start, len(d.candidates)}
+}
+
+// buildMapRequests requests a patch for each target field from each candidate's field with the same key, unless the
+// candidate already has an alias for it. The requests are grouped by field; it returns their offset.
+func (d *differ) buildMapRequests(idx int, candidates span) int {
+	offset := len(d.requestOffsets)
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		fieldEntry := it.GetEntry()
+		fieldKey := fieldEntry.Reference.Key
+		d.requestOffsets = append(d.requestOffsets, len(d.reqs))
+
+		for c := candidates.start; c < candidates.end; c++ {
+			cand := &d.candidates[c]
+			if d.mapAlias(cand, fieldEntry.Reference).ok {
+				continue
+			}
+
+			// Both sides are sorted by key, so each candidate's iterator only moves forward.
+			contextIter := &cand.contextIter
+			for !contextIter.IsDone() && contextIter.GetKey() < fieldKey {
+				contextIter.Next()
+			}
+			if !contextIter.IsDone() && contextIter.GetKey() == fieldKey {
+				d.reqs = append(d.reqs, request{
+					contextIdx: cand.contextIdx,
+					primaryIdx: contextIter.GetIndex(),
+					size:       fieldEntry.Size + 1,
+				})
+			}
+		}
+	}
+	d.requestOffsets = append(d.requestOffsets, len(d.reqs))
+	return offset
+}
+
+// assembleMapPatch records the candidate's patch for the target map idx, and keeps it if it is the cheapest for its
+// request so far.
+func (d *differ) assembleMapPatch(idx int, cand *candidate, offset int) {
+	primaryIdx := cand.contextIdx
+	patchStart := len(d.tape)
+	size := 2
+
+	// Start from a copy when fewer deletes than aliases are needed. This is only an estimate:
+	// same-key aliases are cheaper than renamed aliases, but both count equally here.
+	// removedFields is walked twice on purpose: the count decides between enterCopy and enterBlank, which must
+	// be on the tape before the deletes are emitted.
+	isCopy := d.removedFields(primaryIdx, idx, false) < cand.aliasCount
+	if isCopy {
+		d.enterCopy(primaryIdx)
+		size += 2 * d.removedFields(primaryIdx, idx, true)
+	} else {
+		d.enterBlank(primaryIdx)
+	}
+
+	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		fieldEntry := it.GetEntry()
+		fieldKey := fieldEntry.Reference.Key
+
+		switch alias := d.mapAlias(cand, fieldEntry.Reference); {
+		case alias.ok && alias.sameKey:
+			// A copied object already has the field.
+			if !isCopy {
+				d.emit(opRec{code: codeObjectCopyField, a: alias.fieldIdx})
+				size += 2
+			}
+		case alias.ok:
+			d.emit(opRec{code: codePushFieldCopy, a: alias.fieldIdx})
+			d.emit(opRec{code: codeReturnIntoObjectPop, key: fieldKey})
+			size += 2 + 1 + len(fieldKey)
+		default:
+			// Not an alias: use a reconstructed child patch, or insert the value directly.
+			fieldReq := d.childPatch(d.requestsForField(offset, fieldEntry.Reference.Index), cand.contextIdx)
+			if fieldReq == nil {
+				d.emit(opRec{code: codeObjectSetFieldValue, val: fieldEntry.Value, key: fieldKey})
+				size += 1 + len(fieldKey) + fieldEntry.Size
+				break
+			}
+
+			d.emit(opRec{code: codeInclude, a: fieldReq.patch.start, b: fieldReq.patch.end})
+			size += fieldReq.size
+			if d.left.Entries[fieldReq.patchSourceIdx].Reference.Key == fieldKey {
+				d.emit(opRec{code: codeReturnIntoObjectSameKeyPop})
+				size += 1
+			} else {
+				d.emit(opRec{code: codeReturnIntoObjectPop, key: fieldKey})
+				size += 1 + len(fieldKey)
+			}
+		}
+	}
+
+	d.updateRequest(cand.requestIdx, span{patchStart, len(d.tape)}, size, primaryIdx)
 }
 
 type sliceAlias struct {
+	ok             bool
 	elementIdx     int
 	prevIsAdjacent bool
 	nextIsAdjacent bool
 }
 
-type sliceCandidate struct {
-	alias      map[int]sliceAlias
-	requestIdx int
-	contextIdx int
+func (d *differ) addSliceCandidate(contextIdx int, requestIdx int, elementCount int) {
+	d.addCandidate(contextIdx, requestIdx, len(d.sliceAliases))
+	for i := 0; i < elementCount; i++ {
+		d.sliceAliases = append(d.sliceAliases, sliceAlias{})
+	}
 }
 
-func (sc *sliceCandidate) init(contextIdx int, requestIdx int) {
-	sc.alias = map[int]sliceAlias{}
-	sc.requestIdx = requestIdx
-	sc.contextIdx = contextIdx
+func (d *differ) sliceAlias(cand *candidate, pos int) *sliceAlias {
+	return &d.sliceAliases[cand.aliasOffset+pos]
 }
 
-func (sc *sliceCandidate) insertAlias(target mendoza.Reference, source mendoza.Reference, size int) {
+func (d *differ) insertSliceAlias(cand *candidate, target mendoza.Reference, source mendoza.Reference) {
 	// We assume here that you'll only invoke this method in the same order
 	// as you want to build the array.
 
-	current, ok := sc.alias[target.Index]
+	current := d.sliceAlias(cand, target.Index)
 
-	if ok && current.prevIsAdjacent {
+	if current.ok && current.prevIsAdjacent {
 		// Once we've found something which is adjacent. Don't look any further.
 		return
 	}
 
-	if prevSource, prevOk := sc.alias[target.Index-1]; prevOk {
-		if prevSource.elementIdx+1 == source.Index {
+	var prev *sliceAlias
+	if target.Index > 0 {
+		prev = d.sliceAlias(cand, target.Index-1)
+	}
+
+	if prev != nil && prev.ok {
+		if prev.elementIdx+1 == source.Index {
 			// This one is perfectly adjacent. Use it!
-			sc.alias[target.Index] = sliceAlias{
+			*current = sliceAlias{
+				ok:             true,
 				elementIdx:     source.Index,
 				prevIsAdjacent: true,
 			}
-			prevSource.nextIsAdjacent = true
-			sc.alias[target.Index-1] = prevSource
+			prev.nextIsAdjacent = true
 			return
 		}
 
-		if source.Index <= prevSource.elementIdx {
-			// We want to prefer values that are _after_ the previous index.
-
-			if ok {
-				// However, we can only return if we've already found a value.
-				// Otherwise we must use this new value.
-				return
-			}
+		// We want to prefer values that are _after_ the previous index. However, we can only return if we've
+		// already found a value. Otherwise we must use this new value.
+		if source.Index <= prev.elementIdx && current.ok {
+			return
 		}
 	}
 
-	if ok && current.elementIdx < source.Index {
+	if current.ok && current.elementIdx < source.Index {
 		// Prefer smaller over larger
 		return
 	}
 
-	sc.alias[target.Index] = sliceAlias{
+	*current = sliceAlias{
+		ok:             true,
 		elementIdx:     source.Index,
 		prevIsAdjacent: false,
 	}
 }
 
-func (d *differ) reconstructSlice(idx int, reqs []request) {
-	// right-index -> requests
-	elementRequests := [][]request{}
+func (d *differ) reconstructSlice(idx int, reqs span) {
+	// Everything appended to the scratch arenas is removed again before returning.
+	mark := d.mark()
 
-	candidates := make([]sliceCandidate, 0, len(reqs))
-
-	for i, req := range reqs {
-		if !d.left.Entries[req.primaryIdx].IsNonEmptySlice() {
-			continue
-		}
-
-		cand := sliceCandidate{}
-		cand.init(req.primaryIdx, i)
-		candidates = append(candidates, cand)
+	candidates := d.findSliceCandidates(idx, reqs)
+	d.findAliases(idx, candidates)
+	offset := d.buildSliceRequests(idx, candidates)
+	d.reconstructChildren(idx, offset)
+	for c := candidates.start; c < candidates.end; c++ {
+		d.assembleSlicePatch(idx, &d.candidates[c], offset)
 	}
 
+	d.restore(mark)
+}
+
+// findSliceCandidates adds a candidate for each request whose primary value is an array. Unlike maps, arrays don't
+// look for other candidates.
+func (d *differ) findSliceCandidates(idx int, reqs span) span {
+	elementCount := len(d.right.Entries[idx].Value.([]interface{}))
+	start := len(d.candidates)
+	for i := reqs.start; i < reqs.end; i++ {
+		if primaryIdx := d.reqs[i].primaryIdx; d.left.Entries[primaryIdx].IsNonEmptySlice() {
+			d.addSliceCandidate(primaryIdx, i, elementCount)
+		}
+	}
+	return span{start, len(d.candidates)}
+}
+
+// buildSliceRequests requests a patch for each target element from each candidate's element at the same position,
+// unless the candidate already has an alias for it. The requests are grouped by element; it returns their offset.
+func (d *differ) buildSliceRequests(idx int, candidates span) int {
+	offset := len(d.requestOffsets)
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
 		elementEntry := it.GetEntry()
-		elementRequests = append(elementRequests, nil)
+		d.requestOffsets = append(d.requestOffsets, len(d.reqs))
 
-		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
-			otherEntry := d.left.Entries[otherIdx]
-
-			for candIdx := range candidates {
-				cand := &candidates[candIdx]
-				if cand.contextIdx == otherEntry.Parent {
-					cand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
-				}
-			}
-		}
-	}
-
-	// Now build the requests
-	for _, cand := range candidates {
-		contextIter := d.left.Iter(cand.contextIdx)
-
-		i := 0
-		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
+		for c := candidates.start; c < candidates.end; c++ {
+			cand := &d.candidates[c]
+			contextIter := &cand.contextIter
 			if contextIter.IsDone() {
-				break
+				continue
 			}
 
-			elementEntry := it.GetEntry()
-
-			if _, ok := cand.alias[elementEntry.Reference.Index]; !ok {
-				elementReqs := elementRequests[i]
-				elementReqs = append(elementReqs, request{
+			if !d.sliceAlias(cand, elementEntry.Reference.Index).ok {
+				d.reqs = append(d.reqs, request{
 					contextIdx: cand.contextIdx,
 					primaryIdx: contextIter.GetIndex(),
 					size:       elementEntry.Size + 1,
 				})
-				elementRequests[i] = elementReqs
-
 			}
-
-			i++
 			contextIter.Next()
 		}
 	}
+	d.requestOffsets = append(d.requestOffsets, len(d.reqs))
+	return offset
+}
 
+// assembleSlicePatch records the candidate's patch for the target array idx, and keeps it if it is the cheapest for
+// its request so far.
+func (d *differ) assembleSlicePatch(idx int, cand *candidate, offset int) {
+	contextIdx := cand.contextIdx
+	patchStart := len(d.tape)
+	d.enterBlank(contextIdx)
+	size := 2
+
+	startSlice := -1
 	for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-		d.reconstruct(it.GetIndex(), elementRequests[it.GetEntry().Reference.Index])
-	}
+		elementEntry := it.GetEntry()
+		pos := elementEntry.Reference.Index
 
-	for _, cand := range candidates {
-		contextIdx := cand.contextIdx
-		size := 0
-		patch := Patch{}
-
-		d.enterBlank(&patch, contextIdx)
-		size += 2
-
-		startSlice := -1
-
-		for it := d.right.Iter(idx); !it.IsDone(); it.Next() {
-			elementEntry := it.GetEntry()
-			pos := elementEntry.Reference.Index
-
-			if alias, ok := cand.alias[pos]; ok {
-				if startSlice == -1 {
-					startSlice = alias.elementIdx
-				}
-
-				if alias.nextIsAdjacent {
-					// The next one is adjacent. We don't need to do anything!
-				} else {
-					patch = append(patch, &OpArrayAppendSlice{startSlice, alias.elementIdx + 1})
-					size += 3
-					startSlice = -1
-				}
-			} else {
-				didPatch := false
-
-				for _, elementReq := range elementRequests[pos] {
-					if elementReq.contextIdx == contextIdx {
-						if elementReq.patch != nil {
-							patch = append(patch, elementReq.patch...)
-							size += elementReq.size
-							patch = append(patch, &OpReturnIntoArrayPop{})
-							size += 1
-
-							didPatch = true
-						}
-
-						break
-					}
-				}
-
-				if !didPatch {
-					patch = append(patch, &OpArrayAppendValue{elementEntry.Value})
-					size += 1 + elementEntry.Size
-				}
+		if alias := d.sliceAlias(cand, pos); alias.ok {
+			if startSlice == -1 {
+				startSlice = alias.elementIdx
 			}
+			// Emit the slice when the run of adjacent aliases ends.
+			if !alias.nextIsAdjacent {
+				d.emit(opRec{code: codeArrayAppendSlice, a: startSlice, b: alias.elementIdx + 1})
+				size += 3
+				startSlice = -1
+			}
+			continue
 		}
 
-		req := &reqs[cand.requestIdx]
-		req.update(patch, size, d.left.Entries[contextIdx].Reference.Key)
+		// Not an alias: use a reconstructed child patch, or insert the value directly.
+		if elementReq := d.childPatch(d.requestsForField(offset, pos), contextIdx); elementReq != nil {
+			d.emit(opRec{code: codeInclude, a: elementReq.patch.start, b: elementReq.patch.end})
+			d.emit(opRec{code: codeReturnIntoArrayPop})
+			size += elementReq.size + 1
+		} else {
+			d.emit(opRec{code: codeArrayAppendValue, val: elementEntry.Value})
+			size += 1 + elementEntry.Size
+		}
 	}
 
+	d.updateRequest(cand.requestIdx, span{patchStart, len(d.tape)}, size, contextIdx)
 }
 
 // String handling
@@ -748,11 +901,11 @@ func commonSuffix(a, b string, prefix int) int {
 	return i
 }
 
-func (d *differ) reconstructString(idx int, rightString string, reqs []request) {
-	for reqIdx, req := range reqs {
-		leftEntry := d.left.Entries[req.primaryIdx]
+func (d *differ) reconstructString(rightString string, reqs span) {
+	for reqIdx := reqs.start; reqIdx < reqs.end; reqIdx++ {
+		primaryIdx := d.reqs[reqIdx].primaryIdx
 
-		leftString, ok := leftEntry.Value.(string)
+		leftString, ok := d.left.Entries[primaryIdx].Value.(string)
 		if !ok {
 			continue
 		}
@@ -761,16 +914,13 @@ func (d *differ) reconstructString(idx int, rightString string, reqs []request) 
 			panic("unnecessary reconstruction of string")
 		}
 
-		patch := Patch{}
-		size := 0
-
-		d.enterBlank(&patch, req.primaryIdx)
-		size += 2
+		patchStart := len(d.tape)
+		d.enterBlank(primaryIdx)
+		size := 2
 
 		prefix := commonPrefix(leftString, rightString)
-
 		if prefix > 0 {
-			patch = append(patch, &OpStringAppendSlice{0, prefix})
+			d.emit(opRec{code: codeStringAppendSlice, a: 0, b: prefix})
 			size += 3
 		}
 
@@ -778,16 +928,15 @@ func (d *differ) reconstructString(idx int, rightString string, reqs []request) 
 
 		mid := rightString[prefix : len(rightString)-suffix]
 		if len(mid) > 0 {
-			patch = append(patch, &OpStringAppendString{mid})
+			d.emit(opRec{code: codeStringAppendString, key: mid})
 			size += 1 + len(mid)
 		}
 
 		if suffix > 0 {
-			patch = append(patch, &OpStringAppendSlice{len(leftString) - suffix, len(leftString)})
+			d.emit(opRec{code: codeStringAppendSlice, a: len(leftString) - suffix, b: len(leftString)})
 			size += 3
 		}
 
-		req := &reqs[reqIdx]
-		req.update(patch, size, d.left.Entries[req.primaryIdx].Reference.Key)
+		d.updateRequest(reqIdx, span{patchStart, len(d.tape)}, size, primaryIdx)
 	}
 }

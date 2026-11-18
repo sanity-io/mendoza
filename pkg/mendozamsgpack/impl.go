@@ -37,7 +37,6 @@ func Unmarshal(data []byte) (mendoza.Patch, error) {
 	return mendoza.Patch(mppatch), nil
 }
 
-
 type writer struct {
 	*msgpack.Encoder
 }

@@ -52,7 +52,7 @@ func hasherFor(t byte) Hasher {
 	h := Hasher{
 		hasher: *sha256.New(),
 	}
-	h.hasher.Write([]byte{t})
+	_, _ = h.hasher.Write([]byte{t})
 	return h
 }
 
@@ -71,16 +71,16 @@ var HasherSlice = hasherFor(typeSlice)
 
 func HashString(s string) Hash {
 	h := HasherString
-	h.hasher.Write([]byte(s))
+	h.hasher.WriteString(s)
 	return h.Sum()
 }
 
 func HashFloat64(f float64) Hash {
-	h := hasherFor(typeFloat)
+	h := HasherFloat
 	bits := math.Float64bits(f)
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], bits)
-	h.hasher.Write(buf[:])
+	_, _ = h.hasher.Write(buf[:])
 	return h.Sum()
 }
 
@@ -89,11 +89,11 @@ func (h *Hasher) Sum() Hash {
 }
 
 func (h *Hasher) WriteField(key string, value Hash) {
-	h.hasher.Write([]byte{typeString})
-	h.hasher.Write([]byte(key))
-	h.hasher.Write(value[:])
+	_, _ = h.hasher.Write([]byte{typeString})
+	h.hasher.WriteString(key)
+	_, _ = h.hasher.Write(value[:])
 }
 
 func (h *Hasher) WriteElement(value Hash) {
-	h.hasher.Write(value[:])
+	_, _ = h.hasher.Write(value[:])
 }

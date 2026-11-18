@@ -95,7 +95,7 @@ func (d *Digest) UnmarshalBinary(b []byte) error {
 	b, d.h[6] = consumeUint32(b)
 	b, d.h[7] = consumeUint32(b)
 	b = b[copy(d.x[:], b):]
-	b, d.len = consumeUint64(b)
+	_, d.len = consumeUint64(b)
 	d.nx = int(d.len % chunk)
 	return nil
 }
@@ -199,6 +199,24 @@ func (d *Digest) Write(p []byte) (nn int, err error) {
 	return
 }
 
+// WriteString is like Write, but avoids the allocation of converting s to a []byte.
+//
+// Unlike Write, it copies every block through d.x instead of hashing full blocks in place. That was benchmarked
+// against Write from 16 B to 64 KB with no measurable difference: hashing dominates the copy. Hashing in place
+// would need unsafe, which is not worth it.
+func (d *Digest) WriteString(s string) {
+	d.len += uint64(len(s))
+	for len(s) > 0 {
+		n := copy(d.x[d.nx:], s)
+		d.nx += n
+		s = s[n:]
+		if d.nx == chunk {
+			block(d, d.x[:])
+			d.nx = 0
+		}
+	}
+}
+
 func (d *Digest) Sum(in []byte) []byte {
 	// Make a copy of d so that caller can keep writing and summing.
 	d0 := *d
@@ -212,15 +230,15 @@ func (d *Digest) CheckSum() [Size]byte {
 	var tmp [64]byte
 	tmp[0] = 0x80
 	if len%64 < 56 {
-		d.Write(tmp[0 : 56-len%64])
+		_, _ = d.Write(tmp[0 : 56-len%64])
 	} else {
-		d.Write(tmp[0 : 64+56-len%64])
+		_, _ = d.Write(tmp[0 : 64+56-len%64])
 	}
 
 	// Length in bits.
 	len <<= 3
 	binary.BigEndian.PutUint64(tmp[:], len)
-	d.Write(tmp[0:8])
+	_, _ = d.Write(tmp[0:8])
 
 	if d.nx != 0 {
 		panic("d.nx != 0")
