@@ -47,7 +47,7 @@ Each operation is encoded with its opcode followed by its parameters.
 .A Mendoza patch in JSON representation
 ```javascript
 [
-  18,      // DeleteField
+  19,      // ObjectDeleteField
   0,       //   … at index 0
   10,      // PushFieldCopy
   0,       //   … at index 0
@@ -78,6 +78,11 @@ Note that this means an empty patch (i.e. no operations) will produce a right do
 ## Examples / tutorial
 
 Here are some examples which also serves as a mini tutorial.
+
+Note that the examples write fields by name (e.g. `ObjectDeleteField("name")`) to make them easier to read.
+In the encoded patch, `PushField`, `ObjectCopyField` and `ObjectDeleteField` refer to fields by their index in the sorted list of keys of the input object.
+Composite operations encode the parameters of their parts in order:
+`ObjectSetFieldValue` is `Value` followed by `ReturnIntoObject`, so the value comes before the key (e.g. `[17, 30, "age"]`).
 
 ### Step-by-step example
 
@@ -134,7 +139,7 @@ The following example will modify the zip code in a nested object:
 
 - `PushFieldCopy("user")`
 - `PushFieldCopy("address")`
-- `SetFieldValue("zip", 1234)`
+- `ObjectSetFieldValue("zip", 1234)`
 - `ReturnIntoObjectSameKeyPop()`
 - `ReturnIntoObjectSameKeyPop()`
 
@@ -142,7 +147,7 @@ Note that entering a field remembers the key where it come from, which `ReturnIn
 
 ### Dealing with arrays
 
-Arrays are typically dealt with by pushing with a blank value and then using `ArrayAppendValue` and `ArrayAppendValue`.
+Arrays are typically dealt with by pushing with a blank value and then using `ArrayAppendValue` and `ArrayAppendSlice`.
 `ArrayAppendSlice` refers to indices in the old array (e.g. the input value).
 
 - `PushFieldBlank("skills")`
@@ -225,7 +230,7 @@ The key is stored together with the value in the input stack so that <<OpReturnI
 ### `PushElement` operation
 
 .Parameters
-_None_
+- `idx`: `uint`
 
 The `PushElement` operation looks up an element in the input value (which must an array), and then pushes the value onto the input stack.
 
@@ -251,15 +256,16 @@ The `Pop` operation pops the input stack.
 ### `ObjectDeleteField` operation
 
 .Parameters
-- `key`: `string`
+- `keyIdx`: `uint`
 
 The `ObjectDeleteField` operation deletes a field in the output value (which must be an object).
+`keyIdx` refers to the _nth_ key (after you sort them lexically) in the _input_ value, in the same way as for <<OpPushField,PushField>>.
 
 [[OpArrayAppendValue]]
 ### `ArrayAppendValue` operation
 
 .Parameters
-- `key`: `JSON`
+- `value`: `JSON`
 
 The `ArrayAppendValue` operation appends a JSON value to the output value (which must be an array).
 
