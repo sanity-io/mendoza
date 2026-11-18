@@ -357,11 +357,9 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 		xorHash := entry.XorHash
 		xorHash.Xor(fieldEntry.Hash)
 
-		for _, otherIdx := range d.hashIndex.XorData[xorHash] {
-			otherEntry := d.left.Entries[otherIdx]
-
-			for i, req := range reqs {
-				if otherEntry.Parent == req.contextIdx && otherIdx != req.primaryIdx {
+		for i, req := range reqs {
+			for _, otherIdx := range d.hashIndex.XorData[mendoza.ChildKey{Parent: req.contextIdx, Hash: xorHash}] {
+				if otherIdx != req.primaryIdx {
 					cand := mapCandidate{}
 					cand.init(otherIdx, i)
 					candidates = append(candidates, cand)
@@ -374,14 +372,10 @@ func (d *differ) reconstructMap(idx int, reqs []request) {
 		fieldEntry := it.GetEntry()
 		fieldRequests = append(fieldRequests, nil)
 
-		for _, otherIdx := range d.hashIndex.Data[fieldEntry.Hash] {
-			otherEntry := d.left.Entries[otherIdx]
-
-			for candIdx := range candidates {
-				cand := &candidates[candIdx]
-				if cand.contextIdx == otherEntry.Parent {
-					cand.insertAlias(fieldEntry.Reference, otherEntry.Reference, fieldEntry.Size)
-				}
+		for candIdx := range candidates {
+			cand := &candidates[candIdx]
+			for _, otherIdx := range d.hashIndex.Data[mendoza.ChildKey{Parent: cand.contextIdx, Hash: fieldEntry.Hash}] {
+				cand.insertAlias(fieldEntry.Reference, d.left.Entries[otherIdx].Reference, fieldEntry.Size)
 			}
 		}
 	}
@@ -617,14 +611,10 @@ func (d *differ) reconstructSlice(idx int, reqs []request) {
 		elementEntry := it.GetEntry()
 		elementRequests = append(elementRequests, nil)
 
-		for _, otherIdx := range d.hashIndex.Data[elementEntry.Hash] {
-			otherEntry := d.left.Entries[otherIdx]
-
-			for candIdx := range candidates {
-				cand := &candidates[candIdx]
-				if cand.contextIdx == otherEntry.Parent {
-					cand.insertAlias(elementEntry.Reference, otherEntry.Reference, elementEntry.Size)
-				}
+		for candIdx := range candidates {
+			cand := &candidates[candIdx]
+			for _, otherIdx := range d.hashIndex.Data[mendoza.ChildKey{Parent: cand.contextIdx, Hash: elementEntry.Hash}] {
+				cand.insertAlias(elementEntry.Reference, d.left.Entries[otherIdx].Reference, elementEntry.Size)
 			}
 		}
 	}
